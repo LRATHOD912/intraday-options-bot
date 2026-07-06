@@ -70,8 +70,18 @@ def start(_: bool = Depends(require_api_token)):
     return start_runner()
 
 
+@app.get("/start")
+def start_get(_: bool = Depends(require_api_token)):
+    return start_runner()
+
+
 @app.post("/stop")
 def stop(_: bool = Depends(require_api_token)):
+    return stop_runner()
+
+
+@app.get("/stop")
+def stop_get(_: bool = Depends(require_api_token)):
     return stop_runner()
 
 
