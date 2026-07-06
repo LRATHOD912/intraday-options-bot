@@ -1,0 +1,7 @@
+alpaca-py
+pandas
+numpy
+python-dotenv
+requests
+fastapi
+uvicorn

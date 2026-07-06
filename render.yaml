@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: intraday-options-bot
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
