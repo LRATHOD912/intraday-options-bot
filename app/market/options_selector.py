@@ -1,4 +1,5 @@
 from app.market.options_data import get_option_contracts, get_option_snapshot
+from app.market.market_data import get_latest_price
 
 MIN_DELTA = 0.30
 MAX_DELTA = 0.50
@@ -92,3 +93,14 @@ def choose_best_contract(underlying_symbol, direction, underlying_price):
 
     fallback_candidates.sort(key=lambda x: (str(x["expiration"]), x["distance_from_price"], x["spread_percent"]))
     return fallback_candidates[0], "Best contract selected (fallback without preferred delta)"
+
+
+def select_option_contract(symbol, direction):
+    """Compatibility wrapper for older call-sites.
+
+    Uses latest underlying stock price and delegates to choose_best_contract.
+    """
+    underlying_price = get_latest_price(symbol)
+    if underlying_price is None:
+        return None, f"Unable to fetch latest price for {symbol}"
+    return choose_best_contract(symbol, direction, float(underlying_price))
