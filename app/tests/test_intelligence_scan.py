@@ -11,6 +11,7 @@ from app.analysis.opening_range_engine import analyze_opening_range
 from app.analysis.support_resistance import analyze_support_resistance
 from app.analysis.trend_engine import analyze_trend
 from app.analysis.volatility_engine import analyze_volatility
+from app.analysis.volatility_engine import calculate_atr
 from app.analysis.volume_engine import analyze_volume
 from app.indicators.indicators import calculate_ema, calculate_vwap, calculate_volume_average
 from app.logs.decision_logger import log_decision
@@ -84,10 +85,24 @@ def run_intelligence_scan():
     risk_allowed, risk_reason = risk.can_trade()
     trade_plan = None
     if master_decision["decision"] in ["CALL", "PUT"]:
+        atr_series = calculate_atr(qqq_bars)
+        atr_value = None
+        if atr_series is not None and len(atr_series) > 0:
+            latest_atr = atr_series.iloc[-1]
+            if latest_atr == latest_atr:
+                atr_value = float(latest_atr)
+
+        recent_window = qqq_bars.tail(20)
+        swing_low = float(recent_window["low"].min()) if not recent_window.empty else None
+        swing_high = float(recent_window["high"].max()) if not recent_window.empty else None
+
         trade_plan = build_trade_plan(
             master_decision["decision"],
             latest["close"],
             latest["vwap"],
+            atr=atr_value,
+            swing_low=swing_low,
+            swing_high=swing_high,
         )
     latest_bar_timestamp = qqq_bars.iloc[-1]["timestamp"]
     gate_result = final_trade_gate(

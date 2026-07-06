@@ -309,6 +309,9 @@ def run_backtest(
             decision,
             confirmation_close,
             latest["vwap"],
+            atr=float(volatility_result.get("data", {}).get("atr")) if volatility_result.get("data", {}).get("atr") is not None else None,
+            swing_low=float(current_df.tail(20)["low"].min()) if not current_df.tail(20).empty else None,
+            swing_high=float(current_df.tail(20)["high"].max()) if not current_df.tail(20).empty else None,
         )
 
         score_ok = float(master_decision.get("total_score", 0.0)) >= 90
@@ -334,7 +337,7 @@ def run_backtest(
             rr_2_values.append(float(trade_plan.get("rr_2", 0.0)))
             cooldown_remaining = 10
             entry = float(trade_plan["entry"])
-            target_0 = entry * 1.0015 if decision == "CALL" else entry * 0.9985
+            target_0 = float(trade_plan.get("target_0")) if trade_plan.get("target_0") is not None else (entry * 1.0015 if decision == "CALL" else entry * 0.9985)
             outcome = "time_exit"
             exit_price = None
             exit_reason = None
