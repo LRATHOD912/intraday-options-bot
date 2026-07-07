@@ -145,7 +145,7 @@ def _build_ui_html(api_token: str) -> str:
 <head>
     <meta charset=\"utf-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>QQQ Intraday Options Bot</title>
+    <title>Intraday Options Bot</title>
     <style>
         :root {{
             color-scheme: light;
@@ -218,8 +218,8 @@ def _build_ui_html(api_token: str) -> str:
     <div class=\"wrap\">
         <div class=\"hero\">
             <div>
-                <h1>QQQ Intraday Options Bot</h1>
-                <div class=\"muted\">Paper-first live control dashboard</div>
+                <h1>Intraday Options Bot</h1>
+                    <div class=\"muted\">Paper-first control tower for the tape</div>
             </div>
             <div class=\"pill mono\" id=\"last-refresh\">Loading...</div>
         </div>
