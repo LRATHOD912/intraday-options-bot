@@ -64,6 +64,7 @@ class TestDashboardApi(unittest.TestCase):
             "risk": {},
             "orders": [],
             "journal": [],
+            "decision_history": [{"timestamp": "2026-01-01T09:45:00-05:00", "symbol": "QQQ", "reason": "No valid setup"}],
             "last_scan_decision": {},
         },
     )
@@ -79,7 +80,9 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("risk", body)
         self.assertIn("orders", body)
         self.assertIn("journal", body)
+        self.assertIn("decision_history", body)
         self.assertIn("last_scan_decision", body)
+        self.assertEqual(body["decision_history"][0]["symbol"], "QQQ")
         self.assertNotIn("API_TOKEN", response.text)
         self.assertNotIn("X-API-Token", response.text)
 

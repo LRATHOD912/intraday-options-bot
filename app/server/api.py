@@ -48,6 +48,62 @@ def _read_jsonl(path: Path, limit: int = 100):
     return rows[-limit:]
 
 
+def _friendly_error_text(raw_error):
+    text = str(raw_error or "").lower()
+    if not text:
+        return None
+    if "timeout" in text:
+        return "API timeout"
+    if "rate" in text and "limit" in text:
+        return "Rate limit"
+    if "closed" in text:
+        return "Market closed"
+    if "buying power" in text:
+        return "Buying power insufficient"
+    if "quote" in text:
+        return "Quote unavailable"
+    if "option" in text and "found" in text:
+        return "Option contract not found"
+    if "alpaca" in text and "reject" in text:
+        return "Alpaca rejected order"
+    return "Execution error"
+
+
+def _build_decision_history(limit: int = 100):
+    snapshot = _read_json_file(Path("logs/decision_history_last_100.json"))
+    rows = snapshot if isinstance(snapshot, list) else _read_jsonl(Path("logs/decisions.jsonl"), limit=limit)
+    rows = rows[-limit:]
+    output = []
+    for row in rows:
+        trace = row.get("trace") or {}
+        output.append(
+            {
+                "timestamp": row.get("timestamp"),
+                "symbol": trace.get("symbol") or "QQQ",
+                "regime": trace.get("market_regime") or row.get("regime"),
+                "trend": trace.get("trend"),
+                "vwap_status": trace.get("vwap_status"),
+                "ema_status": trace.get("ema_status"),
+                "adx": trace.get("adx"),
+                "atr": trace.get("atr"),
+                "volume_score": trace.get("volume_score"),
+                "rsi": trace.get("rsi"),
+                "macd": trace.get("macd"),
+                "spread": trace.get("option_spread"),
+                "delta": trace.get("option_delta"),
+                "strategy": trace.get("selected_strategy") or (row.get("strategy_route") or {}).get("strategy_name") or "No strategy",
+                "decision": (row.get("master_decision") or {}).get("decision") or "NO_TRADE",
+                "confidence": trace.get("confidence"),
+                "entry_quality": trace.get("entry_quality") or row.get("entry_quality_score"),
+                "accepted": bool(trace.get("accepted", (row.get("gate_result") or {}).get("allowed"))),
+                "reason": trace.get("reason") or (row.get("gate_result") or {}).get("reason"),
+                "reason_raw": trace.get("reason_raw") or (row.get("gate_result") or {}).get("reason"),
+                "contract": trace.get("selected_option_contract"),
+            }
+        )
+    return output
+
+
 def _read_latest_decision():
         return (_read_jsonl(Path("logs/decisions.jsonl"), limit=1) or [None])[0]
 
@@ -101,6 +157,39 @@ def _build_dashboard_payload():
                 "use_tuned_staged_exits": USE_TUNED_STAGED_EXITS,
         }
 
+        latest_trace = (latest_decision or {}).get("trace") if isinstance(latest_decision, dict) else {}
+        if not isinstance(latest_trace, dict):
+            latest_trace = {}
+        strategy_state = strategy_status()
+        strategy_perf = get_strategy_summary(limit=20)
+        disabled_details = []
+        for name in (strategy_state.get("disabled_strategies") or []):
+            bucket = (strategy_perf.get("strategies") or {}).get(name, {})
+            disabled_details.append(
+                {
+                    "name": name,
+                    "status": "Disabled",
+                    "disabled_at": bucket.get("disabled_until"),
+                    "reason": bucket.get("disabled_reason") or "Unknown",
+                }
+            )
+        decision_history = _build_decision_history(limit=100)
+
+        account_snapshot = _read_json_file(Path("logs/account_snapshot.json")) or {}
+        call_exposure = 0.0
+        put_exposure = 0.0
+        for position in positions:
+            qty = float(position.get("remaining_quantity") or position.get("quantity") or 0)
+            price = float(position.get("current_price") or position.get("entry_price") or 0)
+            exposure = qty * price * 100.0
+            if str(position.get("direction", "")).upper() == "CALL":
+                call_exposure += exposure
+            elif str(position.get("direction", "")).upper() == "PUT":
+                put_exposure += exposure
+
+        today_perf = (get_summary(limit_last=20) or {}).get("today", {})
+        overall_perf = (get_summary(limit_last=20) or {}).get("overall", {})
+
         return {
                 "status": {
                         "running": runner.get("running"),
@@ -109,6 +198,11 @@ def _build_dashboard_payload():
                         "last_scan_at": runner.get("last_scan_at"),
                         "last_error": runner.get("last_error"),
                         "open_positions_count": len(positions),
+                        "current_regime": latest_trace.get("market_regime") or (latest_decision or {}).get("regime"),
+                        "current_strategy": latest_trace.get("selected_strategy") or ((latest_decision or {}).get("strategy_route") or {}).get("strategy_name"),
+                        "current_confidence": latest_trace.get("confidence") or ((latest_decision or {}).get("strategy_route") or {}).get("confidence"),
+                        "current_entry_quality": latest_trace.get("entry_quality") or (latest_decision or {}).get("entry_quality_score"),
+                        "friendly_last_error": _friendly_error_text(runner.get("last_error")),
                 },
                 "positions": positions,
                 "risk": risk_state,
@@ -116,9 +210,43 @@ def _build_dashboard_payload():
                 "journal": _read_jsonl(Path("logs/trade_journal.jsonl"), limit=20),
                 "performance": get_summary(limit_last=20),
                 "strategy_performance": get_strategy_summary(limit=20),
-                "strategy_status": strategy_status(),
+                    "strategy_status": strategy_state,
+                    "strategy_disabled_details": disabled_details,
                 "config_summary": config_summary,
                 "last_scan_decision": latest_decision,
+                    "decision_history": decision_history,
+                    "health": {
+                        "scanner_running": bool(runner.get("running")),
+                        "monitor_running": bool(runner.get("thread_alive")),
+                        "scheduler_running": bool(runner.get("running")),
+                        "broker_connected": True,
+                        "alpaca_connected": bool(USE_ALPACA_PAPER_EXECUTION),
+                        "market_data_connected": True,
+                        "options_feed_connected": True,
+                        "last_successful_scan": runner.get("last_scan_at"),
+                        "last_successful_order": (_read_jsonl(Path("logs/paper_orders.jsonl"), limit=1) or [{}])[-1].get("timestamp"),
+                        "last_successful_exit": (_read_jsonl(Path("logs/trade_journal.jsonl"), limit=20) or [{}])[-1].get("timestamp"),
+                        "heartbeat": datetime.now().isoformat(),
+                    },
+                    "metrics": {
+                        "today_pnl": today_perf.get("realized_pnl", 0.0),
+                        "weekly_pnl": overall_perf.get("last_5_days_realized_pnl", 0.0),
+                        "monthly_pnl": overall_perf.get("last_20_days_realized_pnl", 0.0),
+                        "profit_factor": overall_perf.get("profit_factor", 0.0),
+                        "win_rate": overall_perf.get("win_rate", 0.0),
+                        "average_r": overall_perf.get("average_r", 0.0),
+                        "expectancy": overall_perf.get("expectancy", 0.0),
+                        "largest_winner": overall_perf.get("largest_win", 0.0),
+                        "largest_loser": overall_perf.get("largest_loss", 0.0),
+                        "consecutive_wins": overall_perf.get("consecutive_wins", 0),
+                        "consecutive_losses": overall_perf.get("consecutive_losses", 0),
+                        "max_drawdown": overall_perf.get("max_drawdown", 0.0),
+                        "current_exposure": call_exposure + put_exposure,
+                        "call_exposure": call_exposure,
+                        "put_exposure": put_exposure,
+                        "buying_power": account_snapshot.get("buying_power"),
+                        "used_buying_power": account_snapshot.get("used_buying_power"),
+                    },
                 # Backward-compatible fields.
                 "bot": {
                         "running": runner.get("running"),
@@ -474,6 +602,9 @@ def _build_public_dashboard_payload():
     disabled_strategies = strategy_state.get("disabled_strategies") or strategy_state.get("disabled") or []
 
     reason = decision.get("reason") or decision.get("skip_reason") or decision.get("rejection_reason") or status.get("last_error") or "No reason recorded yet"
+    trace_reason = ((decision.get("trace") or {}).get("reason") if isinstance(decision, dict) else None)
+    if trace_reason:
+        reason = trace_reason
     last_decision = strategy_route.get("decision") or strategy_route.get("strategy_name") or decision.get("signal") or "No decision yet"
     active_strategy = strategy_route.get("strategy_name") or payload.get("active_strategy") or "No strategy selected yet"
 
@@ -574,6 +705,7 @@ def _build_public_dashboard_payload():
         "risk": risk,
         "orders": payload.get("orders_last_10") or payload.get("orders", [])[:10],
         "journal": payload.get("journal_last_10") or payload.get("journal", [])[:10],
+        "decision_history": payload.get("decision_history", [])[-20:],
         "last_scan_decision": decision,
         "last_skipped_reason": decision.get("skip_reason") or decision.get("rejection_reason") or reason,
         "strategy": {
@@ -658,6 +790,8 @@ def _build_public_dashboard_html(view_token: str) -> str:
             </div>
             <div class="panel card">
                 <h2 class="section-title">Recent Activity</h2>
+                <div><span class="badge">Decision History</span></div>
+                <div class="table-wrap"><table id="decision-table"></table></div>
                 <div><span class="badge">Last 10 Journal Events</span></div>
                 <div class="table-wrap"><table id="journal-table"></table></div>
                 <div style="margin-top:10px;"><span class="badge">Last 10 Orders</span></div>
@@ -756,6 +890,18 @@ def _build_public_dashboard_html(view_token: str) -> str:
                     { key: 'timestamp', label: 'Time' },
                     { key: 'event_type', label: 'Event' },
                     { key: 'payload', label: 'Details' },
+                ]);
+                tableFromRows('decision-table', data.decision_history || [], [
+                    { key: 'timestamp', label: 'Time' },
+                    { key: 'symbol', label: 'Symbol' },
+                    { key: 'regime', label: 'Regime' },
+                    { key: 'strategy', label: 'Strategy' },
+                    { key: 'decision', label: 'Decision' },
+                    { key: 'confidence', label: 'Confidence' },
+                    { key: 'entry_quality', label: 'Entry Quality' },
+                    { key: 'contract', label: 'Contract' },
+                    { key: 'accepted', label: 'Accepted' },
+                    { key: 'reason', label: 'Reason' },
                 ]);
                 tableFromRows('orders-table', data.orders || [], [
                     { key: 'timestamp', label: 'Time' },

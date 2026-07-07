@@ -49,6 +49,8 @@ class TestStrategyRouter(unittest.TestCase):
             "price_near_support": True,
             "price_near_resistance": False,
         }
+        if "base_regime" in kwargs:
+            context["regime_result"] = kwargs.pop("base_regime")
         context.update(kwargs)
         return strategy_router.route_strategy(**context)
 

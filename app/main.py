@@ -19,6 +19,7 @@ from app.analytics.performance_tracker import get_summary
 from app.broker.paper_broker import submit_buy_order as submit_paper_buy_order
 from app.broker.orders import submit_option_buy_order
 from app.config import (
+    ALLOW_0DTE,
     ALLOW_MULTIPLE_POSITIONS,
     ALLOW_OPPOSITE_DIRECTION_POSITIONS,
     BASE_POSITION_QUANTITY,
@@ -32,8 +33,12 @@ from app.config import (
     MIN_ENTRY_QUALITY_SCORE,
     MIN_OPTION_PRICE,
     MIN_CONTRACTS_PER_TRADE,
+    MIN_OPTION_OPEN_INTEREST,
+    MIN_OPTION_VOLUME,
     OPTION_FILTER_STRICTNESS,
     POSITION_QUANTITY,
+    PREFERRED_DELTA_MAX,
+    PREFERRED_DELTA_MIN,
     SIMULATE_POSITIONS,
     EXIT_PROFILE,
     RANGE_SCALP_ONLY_PAPER,
@@ -44,7 +49,6 @@ from app.config import (
     USE_REGIME_FILTER,
 )
 from app.execution.live_monitor import monitor_all_open_positions_once, monitor_open_position_once
-from app.execution.monitor import check_exit_rules
 from app.execution.position_manager import get_open_position, get_open_positions, get_total_open_risk, open_position
 from app.execution.trade_manager import build_trade_decision
 from app.indicators.indicators import (
@@ -79,6 +83,134 @@ from app.risk.strategy_control import strategy_enabled
 from app.utils.time_utils import is_market_hours
 
 
+def _friendly_reject_reason(reason):
+    mapping = {
+        "entry_quality_below_threshold": "Confidence too low",
+        "regime_news_risk": "Market regime news risk",
+        "regime_choppy_low_vol_block": "Market regime sideways",
+        "regime_direction_block": "Momentum not confirmed",
+        "outside_strategy_window": "Outside trading hours",
+        "market_closed": "Market closed",
+        "auto_pause": "Risk limit reached",
+        "risk_limit_reached": "Risk limit reached",
+        "multiple_positions_disabled": "Position limit reached",
+        "max_open_positions_reached": "Position limit reached",
+        "duplicate_position": "Duplicate position already open",
+        "opposite_direction_position_exists": "Opposite position already open",
+        "invalid_option_quote": "Quote unavailable",
+        "missing_bid_ask": "Quote unavailable",
+        "spread_too_wide": "Spread too wide",
+        "option_price_out_of_bounds": "No liquid option",
+        "budget_too_small": "Buying power insufficient",
+        "total_open_risk_exceeded": "Risk limit reached",
+        "strategy_router_blocked": "Strategy cooling down",
+        "range_scalp_paper_only": "Paper-only strategy blocked",
+        "no_liquid_contract": "No liquid contract found",
+        "missing_option_symbol": "Option contract missing",
+        "invalid_expiry": "Invalid expiry",
+        "zero_dte_not_allowed": "Outside expiry policy",
+        "delta_out_of_range": "Delta out of range",
+        "option_volume_too_low": "Option volume weak",
+        "option_open_interest_too_low": "Open interest weak",
+        "buying_power_insufficient": "Buying power insufficient",
+    }
+    text = str(reason or "")
+    if text.startswith("auto_pause:"):
+        return "Risk limit reached"
+    return mapping.get(text, text.replace("_", " ").strip().capitalize() if text else "No valid setup")
+
+
+def _build_trace_payload(
+    *,
+    symbol,
+    regime_name,
+    trend_result,
+    latest,
+    volatility_result,
+    volume_result,
+    momentum_result,
+    strategy_route,
+    entry_quality_score,
+    allowed,
+    reason,
+    selected_contract=None,
+    spread_percent=None,
+):
+    selected_strategy = strategy_route.get("strategy_name") if isinstance(strategy_route, dict) else None
+    confidence = strategy_route.get("confidence") if isinstance(strategy_route, dict) else None
+    option_delta = None
+    if isinstance(selected_contract, dict):
+        option_delta = selected_contract.get("delta")
+    return {
+        "trace": {
+            "symbol": symbol,
+            "market_regime": regime_name,
+            "trend": trend_result.get("direction"),
+            "vwap_status": "above_vwap" if float(latest["close"]) > float(latest["vwap"]) else "below_vwap",
+            "ema_status": "bullish" if float(latest["ema_9"]) > float(latest["ema_20"]) else "bearish",
+            "adx": (volatility_result.get("data", {}) or {}).get("adx"),
+            "atr": (volatility_result.get("data", {}) or {}).get("atr"),
+            "volume_score": (volume_result.get("data", {}) or {}).get("rvol"),
+            "rsi": (momentum_result.get("data", {}) or {}).get("rsi"),
+            "macd": (momentum_result.get("data", {}) or {}).get("macd"),
+            "option_spread": spread_percent,
+            "option_delta": option_delta,
+            "entry_quality": entry_quality_score,
+            "confidence": confidence,
+            "selected_strategy": selected_strategy,
+            "selected_option_contract": selected_contract.get("symbol") if isinstance(selected_contract, dict) else None,
+            "accepted": bool(allowed),
+            "reason": _friendly_reject_reason(reason),
+            "reason_raw": reason,
+        }
+    }
+
+
+def _validate_pre_buy_gate(*, contract, option_quote, spread_percent, entry_price, trade_quantity):
+    if not isinstance(contract, dict) or not contract.get("symbol"):
+        return False, "missing_option_symbol"
+
+    expiry_days = contract.get("expiry_days")
+    if expiry_days is None:
+        return False, "invalid_expiry"
+    if int(expiry_days) == 0 and not ALLOW_0DTE:
+        return False, "zero_dte_not_allowed"
+
+    delta = contract.get("delta")
+    if delta is None:
+        return False, "delta_out_of_range"
+    delta = abs(float(delta))
+    if delta < float(PREFERRED_DELTA_MIN) or delta > float(PREFERRED_DELTA_MAX):
+        return False, "delta_out_of_range"
+
+    volume = contract.get("volume")
+    if volume is None or float(volume) < float(MIN_OPTION_VOLUME):
+        return False, "option_volume_too_low"
+
+    open_interest = contract.get("open_interest")
+    if open_interest is None or float(open_interest) < float(MIN_OPTION_OPEN_INTEREST):
+        return False, "option_open_interest_too_low"
+
+    if option_quote is None or not option_quote.get("quote_valid", False):
+        return False, "invalid_option_quote"
+    if option_quote.get("bid") is None or option_quote.get("ask") is None:
+        return False, "missing_bid_ask"
+    if spread_percent is not None and float(spread_percent) > float(MAX_ENTRY_SPREAD_PERCENT):
+        return False, "spread_too_wide"
+    if entry_price is None or float(entry_price) < float(MIN_OPTION_PRICE) or float(entry_price) > float(MAX_OPTION_PRICE):
+        return False, "option_price_out_of_bounds"
+
+    estimated_cost = float(entry_price) * float(max(int(trade_quantity), 1)) * 100.0
+    try:
+        buying_power = float(get_available_budget())
+    except Exception:
+        buying_power = None
+    if buying_power is not None and buying_power < estimated_cost:
+        return False, "buying_power_insufficient"
+
+    return True, "pre_buy_gate_passed"
+
+
 def _get_open_positions_summary():
     return get_open_positions()
 
@@ -110,6 +242,18 @@ def run_bot_scan():
         print("========== Market Status ==========")
         print(market_reason)
         print("NO TRADE")
+        log_decision(
+            {
+                "master_decision": {"decision": "NO_TRADE", "total_score": 0},
+                "gate_result": {"allowed": False, "reason": "market_closed"},
+                "trace": {
+                    "symbol": "QQQ",
+                    "accepted": False,
+                    "reason": _friendly_reject_reason("market_closed"),
+                    "reason_raw": market_reason,
+                },
+            }
+        )
         return
 
     open_positions = _get_open_positions_summary()
@@ -124,6 +268,18 @@ def run_bot_scan():
     now_et = datetime.now(eastern)
     if not (time(9, 45) <= now_et.time() <= time(12, 0)):
         print("NO TRADE: outside strategy window")
+        log_decision(
+            {
+                "master_decision": {"decision": "NO_TRADE", "total_score": 0},
+                "gate_result": {"allowed": False, "reason": "outside_strategy_window"},
+                "trace": {
+                    "symbol": "QQQ",
+                    "accepted": False,
+                    "reason": _friendly_reject_reason("outside_strategy_window"),
+                    "reason_raw": "outside_strategy_window",
+                },
+            }
+        )
         return
 
     symbols = ["SPY", "QQQ", "IWM"]
@@ -253,23 +409,28 @@ def run_bot_scan():
 
     regime_name = regime_result.get("data", {}).get("regime", "CHOPPY")
     if USE_REGIME_FILTER and master_decision.get("decision") in ["CALL", "PUT"]:
-        expected = "TREND_UP" if master_decision["decision"] == "CALL" else "TREND_DOWN"
-        breakout_ok = bool(regime_result.get("direction") == ("bullish" if master_decision["decision"] == "CALL" else "bearish"))
-        if regime_name == "NEWS_RISK":
+        trade_side = "bullish" if master_decision["decision"] == "CALL" else "bearish"
+        breakout_ok = bool(regime_result.get("direction") == trade_side)
+        if (news_result.get("data", {}) or {}).get("can_trade") is False:
             allowed = False
             allow_reason = "regime_news_risk"
-        elif regime_name in ["CHOPPY", "LOW_VOLATILITY"]:
+        elif regime_name in ["CHOPPY", "LOW_VOLATILITY", "COMPRESSION", "RANGE"]:
             align_ok = (
-                opening_range_result.get("direction") == ("bullish" if master_decision["decision"] == "CALL" else "bearish")
-                and volume_result.get("direction") == ("bullish" if master_decision["decision"] == "CALL" else "bearish")
-                and candle_result.get("direction") in [("bullish" if master_decision["decision"] == "CALL" else "bearish"), "neutral"]
+                opening_range_result.get("direction") == trade_side
+                and volume_result.get("direction") == trade_side
+                and candle_result.get("direction") in [trade_side, "neutral"]
             )
             if not align_ok:
                 allowed = False
                 allow_reason = "regime_choppy_low_vol_block"
-        elif regime_name not in [expected, "HIGH_VOLATILITY", "RANGE"] and not breakout_ok:
-            allowed = False
-            allow_reason = "regime_direction_block"
+        else:
+            expected_regimes = ["TREND_UP", "POWER_TREND", "BREAKOUT", "EXPANSION"] if trade_side == "bullish" else ["TREND_DOWN", "POWER_TREND", "BREAKOUT", "EXPANSION"]
+            if regime_name not in expected_regimes + ["HIGH_VOLATILITY", "REVERSAL"] and not breakout_ok:
+                allowed = False
+                allow_reason = "regime_direction_block"
+            if regime_name == "REVERSAL" and not breakout_ok:
+                allowed = False
+                allow_reason = "regime_direction_block"
 
     entry_quality = calculate_entry_quality_score(
         decision=master_decision.get("decision"),
@@ -360,7 +521,45 @@ def run_bot_scan():
         "pause_status": get_pause_status(),
         "market_price": float(latest["close"]),
     }
+    decision_payload.update(
+        _build_trace_payload(
+            symbol="QQQ",
+            regime_name=regime_name,
+            trend_result=trend_result,
+            latest=latest,
+            volatility_result=volatility_result,
+            volume_result=volume_result,
+            momentum_result=momentum_result,
+            strategy_route=strategy_route,
+            entry_quality_score=entry_quality_score,
+            allowed=allowed,
+            reason=allow_reason,
+        )
+    )
     log_decision(decision_payload)
+
+    def _log_rejection(reason_code, selected_contract=None, spread_value=None):
+        log_decision(
+            {
+                **decision_payload,
+                "gate_result": {"allowed": False, "reason": reason_code},
+                **_build_trace_payload(
+                    symbol="QQQ",
+                    regime_name=regime_name,
+                    trend_result=trend_result,
+                    latest=latest,
+                    volatility_result=volatility_result,
+                    volume_result=volume_result,
+                    momentum_result=momentum_result,
+                    strategy_route=strategy_route,
+                    entry_quality_score=entry_quality_score,
+                    allowed=False,
+                    reason=reason_code,
+                    selected_contract=selected_contract,
+                    spread_percent=spread_value,
+                ),
+            }
+        )
 
     breakout_high = premarket_high or opening_high or prev_high
     breakdown_low = premarket_low or opening_low or prev_low
@@ -438,6 +637,7 @@ def run_bot_scan():
         total_open_positions = len(open_positions)
         if not can_take_new_trade():
             print("NO TRADE: daily risk limit reached")
+            _log_rejection("risk_limit_reached")
             log_trade_event(
                 "RISK_BLOCK",
                 {
@@ -450,6 +650,7 @@ def run_bot_scan():
 
         if not ALLOW_MULTIPLE_POSITIONS and total_open_positions > 0:
             print("NO TRADE: multiple positions disabled")
+            _log_rejection("multiple_positions_disabled")
             log_trade_event(
                 "ORDER_SKIPPED",
                 {
@@ -465,6 +666,7 @@ def run_bot_scan():
         route_enabled = USE_STRATEGY_ROUTER and route_name != "NO_TRADE" and strategy_enabled(route_name)
         if USE_STRATEGY_ROUTER and not route_enabled:
             print(f"NO TRADE: strategy router blocked {route_name}")
+            _log_rejection("strategy_router_blocked")
             log_trade_event(
                 "STRATEGY_ROUTED_NO_TRADE",
                 {
@@ -477,6 +679,7 @@ def run_bot_scan():
 
         if USE_STRATEGY_ROUTER and route_name == "RANGE_SCALP_0DTE" and ENABLE_TRADING and RANGE_SCALP_ONLY_PAPER:
             print("NO TRADE: range scalp 0DTE is paper-only by config")
+            _log_rejection("range_scalp_paper_only")
             log_trade_event(
                 "STRATEGY_ROUTED_NO_TRADE",
                 {
@@ -490,6 +693,7 @@ def run_bot_scan():
 
         if total_open_positions >= int(MAX_OPEN_POSITIONS):
             print("NO TRADE: max open positions reached")
+            _log_rejection("max_open_positions_reached")
             log_trade_event(
                 "RISK_BLOCK",
                 {
@@ -515,6 +719,7 @@ def run_bot_scan():
         print(contract)
         if contract:
             if _has_duplicate_position(open_positions, contract.get("symbol"), master_decision["decision"]):
+                _log_rejection("duplicate_position", selected_contract=contract)
                 log_trade_event(
                     "ORDER_SKIPPED",
                     {
@@ -528,6 +733,7 @@ def run_bot_scan():
                 return
 
             if not (ALLOW_OPPOSITE_DIRECTION_POSITIONS or ENABLE_HEDGE_MODE) and _has_conflicting_direction_position(open_positions, "QQQ", master_decision["decision"]):
+                _log_rejection("opposite_direction_position_exists", selected_contract=contract)
                 log_trade_event(
                     "ORDER_SKIPPED",
                     {
@@ -546,6 +752,7 @@ def run_bot_scan():
                 spread_percent = option_quote.get("spread_percent")
 
             if option_quote is None or not option_quote.get("quote_valid", False):
+                _log_rejection("invalid_option_quote", selected_contract=contract)
                 log_trade_event(
                     "ORDER_SKIPPED",
                     {
@@ -557,10 +764,12 @@ def run_bot_scan():
                 )
                 return
             if option_quote.get("bid") is None or option_quote.get("ask") is None:
+                _log_rejection("missing_bid_ask", selected_contract=contract)
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "missing_bid_ask"})
                 return
             if spread_percent is not None and float(spread_percent) > float(MAX_ENTRY_SPREAD_PERCENT):
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "spread_too_wide", "spread_percent": spread_percent})
+                _log_rejection("spread_too_wide", selected_contract=contract, spread_value=spread_percent)
                 return
 
             entry_price = contract.get("mid") or contract.get("ask")
@@ -569,6 +778,7 @@ def run_bot_scan():
             entry_price = float(entry_price) if entry_price is not None else None
             if entry_price is None or entry_price < float(MIN_OPTION_PRICE) or entry_price > float(MAX_OPTION_PRICE):
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "option_price_out_of_bounds", "entry_price": entry_price})
+                _log_rejection("option_price_out_of_bounds", selected_contract=contract, spread_value=spread_percent)
                 return
 
             budget_decision = {
@@ -633,6 +843,27 @@ def run_bot_scan():
                         "trade_budget": budget_decision.get("trade_budget"),
                     },
                 )
+                _log_rejection("budget_too_small", selected_contract=contract, spread_value=spread_percent)
+                return
+
+            gate_ok, gate_reason = _validate_pre_buy_gate(
+                contract=contract,
+                option_quote=option_quote,
+                spread_percent=spread_percent,
+                entry_price=entry_price,
+                trade_quantity=trade_quantity,
+            )
+            if not gate_ok:
+                log_trade_event(
+                    "ORDER_SKIPPED",
+                    {
+                        "phase": "ENTRY",
+                        "symbol": "QQQ",
+                        "option_symbol": contract.get("symbol"),
+                        "reason": gate_reason,
+                    },
+                )
+                _log_rejection(gate_reason, selected_contract=contract, spread_value=spread_percent)
                 return
 
             new_trade_risk = float(trade_plan.get("risk_per_contract", trade_plan.get("risk_per_share", 0.0)) or 0.0) * float(trade_quantity) * 100.0
@@ -650,6 +881,7 @@ def run_bot_scan():
                     },
                 )
                 print("NO TRADE: total open risk exceeded")
+                _log_rejection("total_open_risk_exceeded", selected_contract=contract, spread_value=spread_percent)
                 return
 
             order_result = submit_option_buy_order(contract["symbol"], qty=trade_quantity, limit_price=entry_price, timeout_seconds=5)
@@ -781,6 +1013,7 @@ def run_bot_scan():
                         )
             else:
                 print("Position not saved: order not submitted and simulation mode disabled")
+                _log_rejection(str(order_result.get("reason", "order_not_submitted")), selected_contract=contract, spread_value=spread_percent)
                 log_trade_event(
                     "ORDER_SKIPPED",
                     {
@@ -792,6 +1025,7 @@ def run_bot_scan():
                     },
                 )
         else:
+            _log_rejection("no_liquid_contract")
             log_trade_event("OPTION_SELECTION_BLOCK", {"symbol": "QQQ", "decision": master_decision.get("decision"), "reason": reason})
             log_trade_event(
                 "ORDER_SKIPPED",
@@ -807,15 +1041,6 @@ def run_bot_scan():
     print("\n========== Risk Check ==========")
     print(f"Can Trade: {can_trade}")
     print(f"Reason   : {risk_reason}")
-
-    print("\n========== Exit Monitor Test ==========")
-    exit_test = check_exit_rules(
-        option_symbol="QQQ_TEST_CONTRACT",
-        entry_price=2.00,
-        current_price=1.55,
-        qty=1,
-    )
-    print(exit_test)
 
     log_message("Bot scan completed")
 

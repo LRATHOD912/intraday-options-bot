@@ -1,1 +1,4 @@
 {"timestamp": "2026-07-06T01:18:49.633206-04:00", "event_type": "ORDER_SKIPPED", "payload": {"phase": "TEST", "reason": "smoke"}}
+{"timestamp": "2026-07-07T10:45:29.611167-04:00", "event_type": "OPTION_SELECTION_BLOCK", "payload": {"symbol": "QQQ", "decision": "PUT", "reason": "No valid contracts after filters: {'snapshot_missing': 0, 'bad_quote': 0, 'zero_dte_block': 100, 'spread_block': 0, 'volume_block': 0, 'oi_block': 0, 'premium_block': 0}"}}
+{"timestamp": "2026-07-07T10:45:29.611167-04:00", "event_type": "ORDER_SKIPPED", "payload": {"phase": "ENTRY", "symbol": "QQQ", "reason": "No valid contracts after filters: {'snapshot_missing': 0, 'bad_quote': 0, 'zero_dte_block': 100, 'spread_block': 0, 'volume_block': 0, 'oi_block': 0, 'premium_block': 0}"}}
+{"timestamp": "2026-07-07T10:46:08.295683-04:00", "event_type": "ENTRY_QUALITY_BLOCK", "payload": {"symbol": "QQQ", "decision": "PUT", "entry_quality_score": 54, "threshold": 75}}

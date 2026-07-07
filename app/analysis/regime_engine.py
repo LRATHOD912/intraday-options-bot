@@ -42,58 +42,83 @@ def analyze_regime(df: pd.DataFrame, opening_range_result=None, volume_result=No
     opening_dir = (opening_range_result or {}).get("direction", "neutral")
     news_block = bool((news_result or {}).get("data", {}).get("can_trade") is False)
 
-    regime = "CHOPPY"
+    regime = "RANGE"
     direction = "neutral"
     signals = []
     warnings = []
-    score = 4.0
+    score = 5.0
+
+    ema_gap_percent = abs(ema_9 - ema_20) / close if close > 0 else 0.0
+    price_vs_vwap = (close - vwap) / close if close > 0 else 0.0
 
     if news_block:
-        regime = "NEWS_RISK"
         warnings.append("News risk regime")
-        score = 1.0
-    elif atr_percent >= 0.012 or recent_range_percent >= 0.018:
         regime = "HIGH_VOLATILITY"
-        warnings.append("High volatility regime")
-        score = 5.0
-    elif atr_percent <= 0.004:
-        regime = "LOW_VOLATILITY"
-        warnings.append("Low volatility regime")
+        score = 2.0
+    elif atr_percent <= 0.0035 and recent_range_percent <= 0.009:
+        regime = "COMPRESSION"
+        warnings.append("Price compression")
         score = 3.0
+    elif atr_percent <= 0.0055:
+        regime = "LOW_VOLATILITY"
+        warnings.append("Low volatility")
+        score = 4.0
+    elif atr_percent >= 0.014 or recent_range_percent >= 0.022:
+        regime = "HIGH_VOLATILITY"
+        warnings.append("High volatility")
+        score = 6.0
 
     bullish_trend = close > vwap and ema_9 > ema_20 and body_percent >= 0.45 and rvol >= 1.2
     bearish_trend = close < vwap and ema_9 < ema_20 and body_percent >= 0.45 and rvol >= 1.2
 
-    bullish_breakout = close >= recent_high * 0.998 and opening_dir == "bullish" and rvol >= 1.2
-    bearish_breakdown = close <= recent_low * 1.002 and opening_dir == "bearish" and rvol >= 1.2
+    bullish_breakout = close >= recent_high * 0.998 and opening_dir == "bullish" and rvol >= 1.25
+    bearish_breakdown = close <= recent_low * 1.002 and opening_dir == "bearish" and rvol >= 1.25
+    bullish_reversal = ema_9 < ema_20 and close > vwap and opening_dir == "bullish" and body_percent >= 0.5
+    bearish_reversal = ema_9 > ema_20 and close < vwap and opening_dir == "bearish" and body_percent >= 0.5
 
-    if regime not in ["NEWS_RISK", "HIGH_VOLATILITY", "LOW_VOLATILITY"]:
-        if bullish_trend:
+    if regime in ["COMPRESSION", "LOW_VOLATILITY", "RANGE"]:
+        if bullish_reversal or bearish_reversal:
+            regime = "REVERSAL"
+            direction = "bullish" if bullish_reversal else "bearish"
+            signals.append("Potential reversal structure")
+            score = max(score, 6.5)
+        elif bullish_breakout or bearish_breakdown:
+            regime = "BREAKOUT"
+            direction = "bullish" if bullish_breakout else "bearish"
+            signals.append("Breakout from recent range")
+            score = max(score, 7.0)
+        elif bullish_trend:
             regime = "TREND_UP"
             direction = "bullish"
             signals.append("EMA/VWAP bullish trend")
-            score = 8.0
+            score = max(score, 7.5)
         elif bearish_trend:
             regime = "TREND_DOWN"
             direction = "bearish"
             signals.append("EMA/VWAP bearish trend")
-            score = 8.0
-        elif bullish_breakout or bearish_breakdown:
-            regime = "RANGE"
-            direction = "bullish" if bullish_breakout else "bearish"
-            signals.append("Range expansion breakout/breakdown")
-            score = 6.0
-        else:
+            score = max(score, 7.5)
+        elif regime == "COMPRESSION":
             regime = "CHOPPY"
             warnings.append("No clean directional structure")
-            score = 3.0
+            score = min(score, 3.5)
+
+    if regime in ["TREND_UP", "TREND_DOWN", "BREAKOUT"] and (atr_percent >= 0.011 or recent_range_percent >= 0.018):
+        regime = "EXPANSION"
+        score = max(score, 8.0)
+        signals.append("Volatility expansion")
+
+    if regime in ["TREND_UP", "TREND_DOWN"] and ema_gap_percent >= 0.004 and rvol >= 1.8 and body_percent >= 0.55:
+        regime = "POWER_TREND"
+        score = max(score, 9.0)
+        signals.append("Strong directional continuation")
+        direction = "bullish" if price_vs_vwap >= 0 else "bearish"
 
     if vix_price is not None:
         try:
             vix_value = float(vix_price)
             if vix_value > 30:
                 warnings.append("VIX proxy elevated")
-                if regime not in ["NEWS_RISK", "HIGH_VOLATILITY"]:
+                if regime not in ["HIGH_VOLATILITY", "EXPANSION", "POWER_TREND"]:
                     regime = "HIGH_VOLATILITY"
         except (TypeError, ValueError):
             pass
@@ -109,6 +134,8 @@ def analyze_regime(df: pd.DataFrame, opening_range_result=None, volume_result=No
         warnings=warnings,
         data={
             "regime": regime,
+            "ema_gap_percent": round(float(ema_gap_percent), 5),
+            "price_vs_vwap": round(float(price_vs_vwap), 5),
             "atr_percent": round(float(atr_percent), 5),
             "recent_range_percent": round(float(recent_range_percent), 5),
             "rvol": round(float(rvol), 4),

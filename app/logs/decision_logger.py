@@ -33,6 +33,7 @@ def log_decision(decision: dict) -> Path:
     logs_dir = root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / "decisions.jsonl"
+    snapshot_path = logs_dir / "decision_history_last_100.json"
 
     eastern = ZoneInfo("America/New_York")
     payload = {
@@ -42,5 +43,16 @@ def log_decision(decision: dict) -> Path:
 
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    history = []
+    if snapshot_path.exists():
+        try:
+            existing = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                history = existing
+        except json.JSONDecodeError:
+            history = []
+    history.append(payload)
+    snapshot_path.write_text(json.dumps(history[-100:], ensure_ascii=False, indent=2), encoding="utf-8")
 
     return log_path

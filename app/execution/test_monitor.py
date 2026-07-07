@@ -10,7 +10,7 @@ tests = [
 
 for name, entry, current in tests:
     result = check_exit_rules(
-        option_symbol="QQQ_TEST_CONTRACT",
+        option_symbol="QQQ_PAPER_MONITOR_CHECK",
         entry_price=entry,
         current_price=current,
         qty=1,

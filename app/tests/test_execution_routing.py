@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.broker import orders
@@ -21,6 +22,22 @@ class TestExecutionRouting(unittest.TestCase):
         self.assertIn("USE_ALPACA_PAPER_EXECUTION=true", result.get("route_reason", ""))
         mock_get_client.assert_called_once()
         fake_client.submit_order.assert_called_once()
+
+    def test_no_fake_contract_symbol_in_execution_files(self):
+        root = Path(__file__).resolve().parents[2]
+        targets = [
+            root / "app" / "main.py",
+            root / "app" / "execution" / "test_monitor.py",
+        ]
+        for target in targets:
+            text = target.read_text(encoding="utf-8")
+            self.assertNotIn("QQQ_TEST_CONTRACT", text)
+
+    def test_runtime_scan_has_no_fake_monitor_order(self):
+        root = Path(__file__).resolve().parents[2]
+        main_path = root / "app" / "main.py"
+        text = main_path.read_text(encoding="utf-8")
+        self.assertNotIn("QQQ_PAPER_MONITOR_CHECK", text)
 
 
 if __name__ == "__main__":
