@@ -964,5 +964,331 @@
       "reason": "Confidence too low",
       "reason_raw": "entry_quality_below_threshold"
     }
+  },
+  {
+    "timestamp": "2026-07-07T10:57:03.551287-04:00",
+    "master_decision": {
+      "decision": "PUT",
+      "total_score": 92.0,
+      "max_score": 135,
+      "confidence": 0.68,
+      "quality": "A+",
+      "bullish_score": 10,
+      "bearish_score": 54,
+      "neutral_score": 28.0,
+      "signals": [
+        "Below previous day low",
+        "Bullish structure",
+        "Gap down",
+        "Close below opening range low",
+        "Gap down holding and extending",
+        "Price below VWAP",
+        "EMA 9 above EMA 20",
+        "Recent price trend is rising",
+        "Higher high and higher low detected",
+        "RSI bullish but not overbought",
+        "Positive rate of change",
+        "Short-term momentum rising",
+        "Normal volume",
+        "Selling candle on volume",
+        "Volume expanding",
+        "Range expansion detected",
+        "Bearish candle pattern: BEARISH_CANDLE",
+        "Most recent candles are bearish",
+        "No high-impact news events loaded"
+      ],
+      "warnings": [
+        "Structure/location conflict",
+        "VWAP and EMA disagree",
+        "Trend conflict: price below VWAP",
+        "Low volatility",
+        "Price compression",
+        "No clean directional structure",
+        "VIX proxy available but change unavailable",
+        "DXY unavailable",
+        "10Y yield unavailable",
+        "Economic calendar integration not connected yet"
+      ],
+      "engine_results": [
+        {
+          "engine": "market_structure",
+          "direction": "bearish",
+          "score": 20,
+          "max_score": 20,
+          "confidence": 1.0,
+          "signals": [
+            "Below previous day low",
+            "Bullish structure",
+            "Gap down"
+          ],
+          "warnings": [
+            "Structure/location conflict"
+          ],
+          "data": {
+            "structure": "BULLISH_STRUCTURE",
+            "gap": "GAP_DOWN",
+            "location": "BELOW_PREVIOUS_LOW",
+            "bullish_score": 6,
+            "bearish_score": 14
+          }
+        },
+        {
+          "engine": "support_resistance",
+          "direction": "neutral",
+          "score": 0,
+          "max_score": 10,
+          "confidence": 0.0,
+          "signals": [],
+          "warnings": [],
+          "data": {
+            "support": 704.92,
+            "resistance": 710.85,
+            "prev_high": 726.03,
+            "prev_low": 718.58,
+            "bullish_score": 0,
+            "bearish_score": 0
+          }
+        },
+        {
+          "engine": "opening_range",
+          "direction": "bearish",
+          "score": 7,
+          "max_score": 10,
+          "confidence": 0.7,
+          "signals": [
+            "Close below opening range low"
+          ],
+          "warnings": [],
+          "data": {
+            "opening_high": 716.27,
+            "opening_low": 711.715,
+            "opening_mid": 713.9925000000001,
+            "latest_close": 706.99,
+            "latest_high": 707.6,
+            "latest_low": 706.81,
+            "bullish_score": 0,
+            "bearish_score": 7
+          }
+        },
+        {
+          "engine": "gap_fill",
+          "direction": "bearish",
+          "score": 6,
+          "max_score": 10,
+          "confidence": 0.6,
+          "signals": [
+            "Gap down holding and extending"
+          ],
+          "warnings": [],
+          "data": {
+            "today_open": 716.42,
+            "prev_close": 722.75,
+            "latest_close": 706.99,
+            "gap_percent": -0.008758,
+            "gap_type": "GAP_DOWN",
+            "bullish_score": 0,
+            "bearish_score": 6
+          }
+        },
+        {
+          "engine": "trend",
+          "direction": "neutral",
+          "score": 10,
+          "max_score": 15,
+          "confidence": 0.67,
+          "signals": [
+            "Price below VWAP",
+            "EMA 9 above EMA 20",
+            "Recent price trend is rising",
+            "Higher high and higher low detected"
+          ],
+          "warnings": [
+            "VWAP and EMA disagree",
+            "Trend conflict: price below VWAP"
+          ],
+          "data": {
+            "close": 706.99,
+            "vwap": 716.5414627197296,
+            "ema_9": 706.859344335501,
+            "ema_20": 706.7071344440725,
+            "vwap_distance_percent": -0.01333
+          }
+        },
+        {
+          "engine": "momentum",
+          "direction": "bullish",
+          "score": 10,
+          "max_score": 10,
+          "confidence": 1.0,
+          "signals": [
+            "RSI bullish but not overbought",
+            "Positive rate of change",
+            "Short-term momentum rising"
+          ],
+          "warnings": [],
+          "data": {
+            "rsi": 64.24,
+            "roc": 0.00069
+          }
+        },
+        {
+          "engine": "volume",
+          "direction": "bearish",
+          "score": 11,
+          "max_score": 15,
+          "confidence": 0.73,
+          "signals": [
+            "Normal volume",
+            "Selling candle on volume",
+            "Volume expanding"
+          ],
+          "warnings": [],
+          "data": {
+            "current_volume": 3187.0,
+            "avg_volume_20": 2716.0,
+            "rvol": 1.17
+          }
+        },
+        {
+          "engine": "volatility",
+          "direction": "neutral",
+          "score": 6,
+          "max_score": 10,
+          "confidence": 0.6,
+          "signals": [
+            "Range expansion detected"
+          ],
+          "warnings": [
+            "Low volatility"
+          ],
+          "data": {
+            "atr": 0.5818,
+            "atr_percent": 0.00082,
+            "recent_range": 0.00156
+          }
+        },
+        {
+          "engine": "candle",
+          "direction": "bearish",
+          "score": 10,
+          "max_score": 10,
+          "confidence": 1.0,
+          "signals": [
+            "Bearish candle pattern: BEARISH_CANDLE",
+            "Most recent candles are bearish"
+          ],
+          "warnings": [],
+          "data": {
+            "last_candle": "BEARISH_CANDLE",
+            "body_percent": 0.3608,
+            "engulfing": null,
+            "green_count_last_3": 1,
+            "red_count_last_3": 2
+          }
+        },
+        {
+          "engine": "regime",
+          "direction": "neutral",
+          "score": 3.0,
+          "max_score": 10,
+          "confidence": 0.3,
+          "signals": [],
+          "warnings": [
+            "Price compression",
+            "No clean directional structure"
+          ],
+          "data": {
+            "regime": "CHOPPY",
+            "ema_gap_percent": 0.00022,
+            "price_vs_vwap": -0.01351,
+            "atr_percent": 0.0,
+            "recent_range_percent": 0.00379,
+            "rvol": 1.17,
+            "body_percent": 0.3608
+          }
+        },
+        {
+          "engine": "market_internals",
+          "direction": "neutral",
+          "score": 4,
+          "max_score": 10,
+          "confidence": 0.4,
+          "signals": [],
+          "warnings": [
+            "VIX proxy available but change unavailable",
+            "DXY unavailable",
+            "10Y yield unavailable"
+          ],
+          "data": {
+            "vix_price": 21.03,
+            "vix_change": null,
+            "dxy_change": null,
+            "ten_year_change": null,
+            "vix_proxy_used": true
+          }
+        },
+        {
+          "engine": "news",
+          "direction": "neutral",
+          "score": 5,
+          "max_score": 5,
+          "confidence": 1,
+          "signals": [
+            "No high-impact news events loaded"
+          ],
+          "warnings": [
+            "Economic calendar integration not connected yet"
+          ],
+          "data": {
+            "can_trade": true
+          }
+        }
+      ]
+    },
+    "gate_result": {
+      "allowed": false,
+      "reason": "entry_quality_below_threshold"
+    },
+    "risk_allowed": true,
+    "risk_reason": "Trading allowed",
+    "entry_quality_score": 59,
+    "regime": "CHOPPY",
+    "strategy_route": {
+      "strategy_name": "NO_TRADE",
+      "direction": "NO_TRADE",
+      "confidence": 0.45,
+      "reason": "No route matched for regime=CHOPPY",
+      "required_exit_profile": "baseline",
+      "recommended_expiry_type": "none",
+      "risk_multiplier": 0.0,
+      "max_hold_minutes": 0
+    },
+    "pause_status": {
+      "paused": false,
+      "reason": null,
+      "updated_at": "2026-07-07T10:57:03.551287-04:00"
+    },
+    "market_price": 706.99,
+    "trace": {
+      "symbol": "QQQ",
+      "market_regime": "CHOPPY",
+      "trend": "neutral",
+      "vwap_status": "below_vwap",
+      "ema_status": "bullish",
+      "adx": null,
+      "atr": 0.5818,
+      "volume_score": 1.17,
+      "rsi": 64.24,
+      "macd": null,
+      "option_spread": null,
+      "option_delta": null,
+      "entry_quality": 59,
+      "confidence": 0.45,
+      "selected_strategy": "NO_TRADE",
+      "selected_option_contract": null,
+      "accepted": false,
+      "reason": "Confidence too low",
+      "reason_raw": "entry_quality_below_threshold"
+    }
   }
 ]

@@ -1,4 +1,5 @@
 from app.broker.orders import submit_option_sell_order
+from app.execution.position_manager import has_open_position
 
 STOP_LOSS_PERCENT = 0.20
 TAKE_PROFIT_PERCENT = 0.25
@@ -11,6 +12,14 @@ def calculate_pnl_percent(entry_price, current_price):
 
 
 def check_exit_rules(option_symbol, entry_price, current_price, qty=1):
+    if not has_open_position():
+        return {
+            "exit": False,
+            "reason": "No open position",
+            "pnl_percent": 0.0,
+            "order": None,
+        }
+
     pnl_percent = calculate_pnl_percent(entry_price, current_price)
 
     if pnl_percent <= -STOP_LOSS_PERCENT:
