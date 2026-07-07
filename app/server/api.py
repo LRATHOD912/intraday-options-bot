@@ -205,6 +205,25 @@ def _build_ui_html(api_token: str) -> str:
         th {{ background: linear-gradient(180deg, #f8fafc, #eef2ff); color: #475569; position: sticky; top: 0; }}
         tbody tr:nth-child(even) {{ background: rgba(248, 250, 252, 0.8); }}
         tbody tr:hover {{ background: rgba(219, 234, 254, 0.45); }}
+        .footer-mark {{
+            margin: 18px 4px 0;
+            padding: 12px 16px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            color: rgba(226, 232, 240, 0.9);
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(10px);
+            letter-spacing: 0.02em;
+            font-size: 0.86rem;
+        }}
+        .footer-mark strong {{
+            color: #ffffff;
+            font-weight: 800;
+        }}
         .muted {{ color: var(--muted); }}
         .mono {{ font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
         @media (max-width: 960px) {{
@@ -219,7 +238,7 @@ def _build_ui_html(api_token: str) -> str:
         <div class=\"hero\">
             <div>
                 <h1>Intraday Options Bot</h1>
-                    <div class=\"muted\">Paper-first control tower for the tape</div>
+                        <div class="muted">Command deck for market structure, flow, and volatility</div>
             </div>
             <div class=\"pill mono\" id=\"last-refresh\">Loading...</div>
         </div>
@@ -270,6 +289,7 @@ def _build_ui_html(api_token: str) -> str:
                 <div class=\"stats\" id=\"strategy-card\"></div>
             </div>
         </div>
+        <div class="footer-mark">Designed by <strong>Lolla</strong> for the tape</div>
     </div>
 
     <script>
