@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 
 from app.analytics.performance_tracker import get_summary
 from app.analytics.strategy_performance import get_strategy_summary
-from app.config import ALPACA_PAPER, API_TOKEN, ENABLE_TRADING, EXIT_PROFILE, MIN_ENTRY_QUALITY_SCORE, POSITION_QUANTITY, USE_ALPACA_PAPER_EXECUTION, USE_DYNAMIC_POSITION_SIZE, USE_REGIME_FILTER, USE_TUNED_STAGED_EXITS
+from app.config import ALPACA_PAPER, API_TOKEN, ENABLE_TRADING, EXIT_PROFILE, MIN_ENTRY_QUALITY_SCORE, POSITION_QUANTITY, USE_ALPACA_PAPER_EXECUTION, USE_DYNAMIC_POSITION_SIZE, USE_REGIME_FILTER, USE_TUNED_STAGED_EXITS, VIEW_TOKEN
 from app.execution.position_manager import get_open_position, get_open_positions, get_total_open_risk, has_open_position
 from app.logs.trade_journal import log_trade_event
 from app.main import run_bot_scan
@@ -428,6 +428,97 @@ def require_api_token(
     return True
 
 
+def require_view_token(token: str = Query(default=None)):
+    if not VIEW_TOKEN or token != VIEW_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
+
+
+def _build_public_dashboard_payload():
+    payload = _build_dashboard_payload()
+    return {
+            "status": payload.get("status", {}),
+            "performance": payload.get("performance", {}),
+            "account": {
+                    "account_status": payload.get("status", {}).get("running") and "running" or "stopped",
+                    "open_positions_count": payload.get("status", {}).get("open_positions_count", 0),
+            },
+            "positions": payload.get("positions", []),
+    }
+
+
+def _build_public_dashboard_html(view_token: str) -> str:
+    token_js = json.dumps(view_token)
+    return """<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Intraday Options Bot | Public View</title>
+    <style>
+        :root { color-scheme: dark; --bg: #07111f; --panel: rgba(15, 23, 42, 0.92); --ink: #e5eefc; --muted: #93a4be; --line: rgba(148, 163, 184, 0.18); }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top left, rgba(37,99,235,.25), transparent 28%), linear-gradient(180deg, #050a12, var(--bg)); color: var(--ink); }
+        .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+        .hero, .panel, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 18px 45px rgba(0,0,0,.28); }
+        .hero { padding: 16px; margin-bottom: 12px; }
+        .hero h1 { margin: 0; font-size: 1.25rem; }
+        .hero p, .hint { margin: 6px 0 0; color: var(--muted); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
+        .card { padding: 12px; }
+        .label { display: block; color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em; }
+        .value { display: block; margin-top: 6px; font-size: 1.1rem; font-weight: 800; }
+        .positions { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+        .position { padding: 12px; border-radius: 16px; background: rgba(255,255,255,.04); }
+        .status { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.08); margin-top: 12px; }
+        .dot { width: 10px; height: 10px; border-radius: 999px; background: #4ade80; }
+        .dot.off { background: #f87171; }
+        @media (max-width: 720px) { .wrap { padding: 12px; } }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="hero">
+            <h1>Intraday Options Bot</h1>
+            <p>Read-only market view</p>
+            <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Loading...</span></div>
+            <div class="hint" id="refresh-text"></div>
+        </div>
+        <div class="grid" id="kpi-grid"></div>
+        <div class="panel">
+            <h2>Open Positions</h2>
+            <div class="positions" id="positions-grid"></div>
+        </div>
+    </div>
+    <script>
+        const VIEW_TOKEN = __VIEW_TOKEN__;
+        function fmt(value) { return Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+        function kpi(label, value) { return `<div class="card"><span class="label">${label}</span><span class="value">${value}</span></div>`; }
+        async function refreshDashboard() {
+            const response = await fetch(`/public-dashboard-data?token=${encodeURIComponent(VIEW_TOKEN)}`);
+            if (!response.ok) { throw new Error(`HTTP ${response.status}`); }
+            const data = await response.json();
+            const status = data.status || {};
+            const performance = data.performance || {};
+            const account = data.account || {};
+            document.getElementById('status-text').textContent = `${status.state || 'Unknown'} · ${status.current_strategy || 'No active strategy'}`;
+            document.getElementById('status-dot').classList.toggle('off', !status.running);
+            document.getElementById('refresh-text').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+            document.getElementById('kpi-grid').innerHTML = [
+                kpi('Today PnL', fmt(performance.today_pnl)),
+                kpi('Win Rate', `${fmt((performance.total_win_rate || 0) * 100)}%`),
+                kpi('Account', fmt(account.open_positions_count ? account.open_positions_count : 0)),
+                kpi('Open Positions', String(status.open_positions_count || 0)),
+            ].join('');
+            document.getElementById('positions-grid').innerHTML = (data.positions || []).map(position => `<div class="position"><strong>${position.option_symbol || '—'}</strong><div class="hint">${position.direction || '—'} · ${fmt(position.current_price)}</div></div>`).join('') || '<div class="hint">No open positions.</div>';
+        }
+        refreshDashboard().catch(() => { document.getElementById('status-text').textContent = 'Unavailable'; document.getElementById('status-dot').classList.add('off'); });
+        setInterval(refreshDashboard, 10000);
+    </script>
+</body>
+</html>""".replace("__VIEW_TOKEN__", token_js)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -547,6 +638,21 @@ def resume_risk(_: bool = Depends(require_api_token)):
 @app.get("/dashboard")
 def dashboard(_: bool = Depends(require_api_token)):
     return _build_dashboard_payload()
+
+
+@app.get("/public-dashboard-data")
+def public_dashboard_data(_: bool = Depends(require_view_token)):
+    return _build_public_dashboard_payload()
+
+
+@app.get("/view")
+def view(_: bool = Depends(require_view_token)):
+    return HTMLResponse(_build_public_dashboard_html(VIEW_TOKEN))
+
+
+@app.get("/public-dashboard")
+def public_dashboard(_: bool = Depends(require_view_token)):
+    return HTMLResponse(_build_public_dashboard_html(VIEW_TOKEN))
 
 
 @app.get("/ui")

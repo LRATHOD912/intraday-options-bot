@@ -14,6 +14,7 @@ BOT_LOOP_SECONDS = int(os.getenv("BOT_LOOP_SECONDS", "60"))
 BOT_START_TIME = os.getenv("BOT_START_TIME", "09:45")
 BOT_END_TIME = os.getenv("BOT_END_TIME", "12:00")
 API_TOKEN = os.getenv("API_TOKEN", "change_this_secret")
+VIEW_TOKEN = os.getenv("VIEW_TOKEN", "change_this_view_token").strip()
 POSITION_QUANTITY = int(os.getenv("POSITION_QUANTITY", "4"))
 BACKTEST_USE_STAGED_EXITS = os.getenv("BACKTEST_USE_STAGED_EXITS", "false").lower() == "true"
 USE_TUNED_STAGED_EXITS = os.getenv("USE_TUNED_STAGED_EXITS", "false").lower() == "true"

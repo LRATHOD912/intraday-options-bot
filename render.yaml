@@ -46,6 +46,8 @@ services:
         value: "false"
       - key: EXIT_PROFILE
         value: "baseline"
+      - key: VIEW_TOKEN
+        value: "change_this_view_token"
       - key: BACKTEST_ENABLE_WALK_FORWARD
         value: "false"
       - key: BACKTEST_WALK_FORWARD_FOLDS
