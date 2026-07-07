@@ -76,6 +76,9 @@ MAX_ENTRY_SPREAD_PERCENT = float(os.getenv("MAX_ENTRY_SPREAD_PERCENT", "0.05"))
 MIN_OPTION_PRICE = float(os.getenv("MIN_OPTION_PRICE", "0.50"))
 MAX_OPTION_PRICE = float(os.getenv("MAX_OPTION_PRICE", "15.00"))
 BACKTEST_SLIPPAGE_PERCENT = float(os.getenv("BACKTEST_SLIPPAGE_PERCENT", "0.00"))
+BACKTEST_ENABLE_WALK_FORWARD = os.getenv("BACKTEST_ENABLE_WALK_FORWARD", "false").lower() == "true"
+BACKTEST_WALK_FORWARD_FOLDS = int(os.getenv("BACKTEST_WALK_FORWARD_FOLDS", "3"))
+BACKTEST_WALK_FORWARD_DAYS = int(os.getenv("BACKTEST_WALK_FORWARD_DAYS", "1"))
 
 # Budget-based position sizing controls.
 USE_BUDGET_POSITION_SIZING = os.getenv("USE_BUDGET_POSITION_SIZING", "true").lower() == "true"

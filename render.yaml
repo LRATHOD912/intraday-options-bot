@@ -46,3 +46,9 @@ services:
         value: "false"
       - key: EXIT_PROFILE
         value: "baseline"
+      - key: BACKTEST_ENABLE_WALK_FORWARD
+        value: "false"
+      - key: BACKTEST_WALK_FORWARD_FOLDS
+        value: "3"
+      - key: BACKTEST_WALK_FORWARD_DAYS
+        value: "1"
