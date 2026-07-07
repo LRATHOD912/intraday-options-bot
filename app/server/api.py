@@ -596,7 +596,7 @@ def _build_public_dashboard_html(view_token: str) -> str:
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Intraday Options Bot | Public View</title>
+    <title>Lolla Market Deck | Intraday Options Bot</title>
     <style>
         :root { color-scheme: dark; --bg: #07111f; --panel: rgba(15, 23, 42, 0.92); --ink: #e5eefc; --muted: #93a4be; --line: rgba(148, 163, 184, 0.18); --good: #4ade80; --bad: #f87171; }
         * { box-sizing: border-box; }
@@ -604,7 +604,8 @@ def _build_public_dashboard_html(view_token: str) -> str:
         .wrap { max-width: 1120px; margin: 0 auto; padding: 16px; }
         .hero, .panel, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 18px 45px rgba(0,0,0,.28); }
         .hero { padding: 16px; margin-bottom: 12px; }
-        .hero h1 { margin: 0; font-size: 1.25rem; }
+        .hero h1 { margin: 0; font-size: 1.32rem; letter-spacing: -0.02em; }
+        .brand { display: inline-block; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.12em; color: #93c5fd; margin-bottom: 6px; }
         .hero p, .hint { margin: 6px 0 0; color: var(--muted); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
         .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 12px; }
@@ -632,8 +633,9 @@ def _build_public_dashboard_html(view_token: str) -> str:
 <body>
     <div class="wrap">
         <div class="hero">
-            <h1>Intraday Options Bot</h1>
-            <p>Read-only market view</p>
+            <div class="brand">Lolla</div>
+            <h1>Lolla Intraday Options Bot</h1>
+            <p>Read-only market view for friends</p>
             <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Loading...</span></div>
             <div class="hint" id="refresh-text"></div>
             <div class="hint" id="meta-text"></div>
