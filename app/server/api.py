@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -149,44 +149,62 @@ def _build_ui_html(api_token: str) -> str:
     <style>
         :root {{
             color-scheme: light;
-            --bg: #f5f7fb;
-            --panel: #ffffff;
-            --ink: #142033;
-            --muted: #667085;
-            --line: #d8e0ea;
+            --bg: #08111f;
+            --panel: rgba(255, 255, 255, 0.92);
+            --ink: #0f172a;
+            --muted: #64748b;
+            --line: rgba(148, 163, 184, 0.28);
             --accent: #0f766e;
-            --accent-2: #1d4ed8;
+            --accent-2: #2563eb;
             --danger: #b42318;
-            --shadow: 0 10px 30px rgba(20, 32, 51, 0.08);
+            --shadow: 0 18px 45px rgba(2, 8, 23, 0.22);
         }}
         * {{ box-sizing: border-box; }}
-        body {{ margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: linear-gradient(180deg, #eef3f8 0%, #f5f7fb 36%, #eef2ff 100%); color: var(--ink); }}
+        body {{ margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif; min-height: 100vh; color: var(--ink); background:
+            radial-gradient(circle at top left, rgba(37, 99, 235, 0.32), transparent 28%),
+            radial-gradient(circle at top right, rgba(124, 58, 237, 0.28), transparent 24%),
+            radial-gradient(circle at 30% 100%, rgba(15, 118, 110, 0.18), transparent 24%),
+            linear-gradient(180deg, #06101d 0%, #0f172a 34%, #111c34 100%); }}
+        body::before {{ content: ''; position: fixed; inset: 0; pointer-events: none; background-image: linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px); background-size: 36px 36px; mask-image: linear-gradient(180deg, rgba(0,0,0,0.85), transparent 88%); }}
         .wrap {{ max-width: 1280px; margin: 0 auto; padding: 16px; }}
-        .hero {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 14px; }}
-        .hero h1 {{ margin: 0; font-size: 1.2rem; }}
-        .pill {{ display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.75); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 0.88rem; }}
+        .hero {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 14px; padding: 18px; border-radius: 24px; background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.82), rgba(12, 74, 110, 0.72)); border: 1px solid rgba(255,255,255,0.12); box-shadow: var(--shadow); color: white; position: relative; overflow: hidden; }}
+        .hero::after {{ content: ''; position: absolute; inset: auto -80px -70px auto; width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle, rgba(34, 211, 238, 0.35), rgba(34, 211, 238, 0)); }}
+        .hero h1 {{ margin: 0; font-size: 1.2rem; letter-spacing: -0.02em; }}
+        .hero .muted {{ color: rgba(226, 232, 240, 0.8); }}
+        .pill {{ display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.18); box-shadow: var(--shadow); font-size: 0.88rem; color: white; backdrop-filter: blur(10px); }}
         .grid {{ display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }}
-        .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 14px; box-shadow: var(--shadow); min-width: 0; }}
+        .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 14px; box-shadow: var(--shadow); min-width: 0; position: relative; overflow: hidden; backdrop-filter: blur(10px); }}
+        .card::before {{ content: ''; position: absolute; inset: 0 auto auto 0; width: 100%; height: 4px; background: linear-gradient(90deg, #2563eb, #7c3aed, #ea580c); }}
+        .card-controls::before {{ background: linear-gradient(90deg, #22c55e, #14b8a6, #0ea5e9); }}
+        .card-status::before {{ background: linear-gradient(90deg, #2563eb, #38bdf8, #14b8a6); }}
+        .card-risk::before {{ background: linear-gradient(90deg, #f59e0b, #f97316, #ef4444); }}
+        .card-decision::before {{ background: linear-gradient(90deg, #7c3aed, #a855f7, #ec4899); }}
+        .card-positions::before {{ background: linear-gradient(90deg, #06b6d4, #0ea5e9, #3b82f6); }}
+        .card-orders::before {{ background: linear-gradient(90deg, #ea580c, #f59e0b, #f43f5e); }}
+        .card-journal::before {{ background: linear-gradient(90deg, #db2777, #f472b6, #8b5cf6); }}
+        .card-strategy::before {{ background: linear-gradient(90deg, #14b8a6, #0f766e, #2563eb); }}
         .span-12 {{ grid-column: span 12; }}
         .span-8 {{ grid-column: span 8; }}
         .span-6 {{ grid-column: span 6; }}
         .span-4 {{ grid-column: span 4; }}
         .span-3 {{ grid-column: span 3; }}
-        h2 {{ font-size: 0.95rem; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }}
+        h2 {{ font-size: 0.95rem; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.08em; color: #0f172a; }}
         .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }}
-        .stat {{ padding: 10px 12px; border-radius: 14px; background: #f8fafc; border: 1px solid var(--line); }}
-        .stat .label {{ display: block; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }}
-        .stat .value {{ font-size: 1rem; font-weight: 700; word-break: break-word; }}
+        .stat {{ padding: 10px 12px; border-radius: 14px; background: linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(241, 245, 249, 0.98)); border: 1px solid rgba(148, 163, 184, 0.22); box-shadow: inset 0 1px 0 rgba(255,255,255,0.75); }}
+        .stat .label {{ display: block; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }}
+        .stat .value {{ font-size: 1rem; font-weight: 700; word-break: break-word; color: #0f172a; }}
         .actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
         button, .btn {{ border: 0; border-radius: 12px; padding: 10px 14px; cursor: pointer; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }}
-        .btn-primary {{ background: var(--accent-2); color: white; }}
-        .btn-secondary {{ background: #e5eefb; color: #0f2d66; }}
-        .btn-danger {{ background: #fee4e2; color: var(--danger); }}
-        .btn-dark {{ background: #1f2937; color: white; }}
-        .table-wrap {{ overflow-x: auto; border-radius: 14px; border: 1px solid var(--line); }}
-        table {{ width: 100%; border-collapse: collapse; min-width: 860px; background: white; }}
-        th, td {{ padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 0.9rem; }}
-        th {{ background: #f8fafc; color: var(--muted); position: sticky; top: 0; }}
+        .btn-primary {{ background: linear-gradient(135deg, #2563eb, #7c3aed); color: white; box-shadow: 0 10px 22px rgba(37, 99, 235, 0.28); }}
+        .btn-secondary {{ background: linear-gradient(135deg, #e0f2fe, #dbeafe); color: #0f2d66; }}
+        .btn-danger {{ background: linear-gradient(135deg, #fee2e2, #fecaca); color: var(--danger); }}
+        .btn-dark {{ background: linear-gradient(135deg, #0f172a, #1f2937); color: white; }}
+        .table-wrap {{ overflow-x: auto; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: inset 0 1px 0 rgba(255,255,255,0.7); }}
+        table {{ width: 100%; border-collapse: collapse; min-width: 860px; background: rgba(255,255,255,0.96); }}
+        th, td {{ padding: 10px 12px; border-bottom: 1px solid rgba(148, 163, 184, 0.18); text-align: left; vertical-align: top; font-size: 0.9rem; }}
+        th {{ background: linear-gradient(180deg, #f8fafc, #eef2ff); color: #475569; position: sticky; top: 0; }}
+        tbody tr:nth-child(even) {{ background: rgba(248, 250, 252, 0.8); }}
+        tbody tr:hover {{ background: rgba(219, 234, 254, 0.45); }}
         .muted {{ color: var(--muted); }}
         .mono {{ font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
         @media (max-width: 960px) {{
@@ -207,7 +225,7 @@ def _build_ui_html(api_token: str) -> str:
         </div>
 
         <div class=\"grid\">
-            <div class=\"card span-12\">
+            <div class=\"card card-controls span-12\">
                 <h2>Bot Controls</h2>
                 <div class=\"actions\">
                     <button class=\"btn btn-primary\" onclick=\"callEndpoint('/start', 'POST')\">Start</button>
@@ -217,37 +235,37 @@ def _build_ui_html(api_token: str) -> str:
                 </div>
             </div>
 
-            <div class=\"card span-4\">
+            <div class=\"card card-status span-4\">
                 <h2>Status</h2>
                 <div class=\"stats\" id=\"status-card\"></div>
             </div>
 
-            <div class=\"card span-4\">
+            <div class=\"card card-risk span-4\">
                 <h2>Daily Risk</h2>
                 <div class=\"stats\" id=\"risk-card\"></div>
             </div>
 
-            <div class=\"card span-4\">
+            <div class=\"card card-decision span-4\">
                 <h2>Strategy / Decision</h2>
                 <div class=\"stats\" id=\"decision-card\"></div>
             </div>
 
-            <div class=\"card span-12\">
+            <div class=\"card card-positions span-12\">
                 <h2>Positions</h2>
                 <div class=\"table-wrap\"><table id=\"positions-table\"></table></div>
             </div>
 
-            <div class=\"card span-6\">
+            <div class=\"card card-orders span-6\">
                 <h2>Orders</h2>
                 <div class=\"table-wrap\"><table id=\"orders-table\"></table></div>
             </div>
 
-            <div class=\"card span-6\">
+            <div class=\"card card-journal span-6\">
                 <h2>Journal</h2>
                 <div class=\"table-wrap\"><table id=\"journal-table\"></table></div>
             </div>
 
-            <div class=\"card span-12\">
+            <div class=\"card card-strategy span-12\">
                 <h2>Strategy Summary</h2>
                 <div class=\"stats\" id=\"strategy-card\"></div>
             </div>
@@ -263,7 +281,7 @@ def _build_ui_html(api_token: str) -> str:
         }}
 
         function statCard(label, value) {{
-            return `<div class=\"stat\"><span class=\"label\">${{label}}</span><span class=\"value mono\">${{value ?? '—'}}</span></div>`;
+            return `<div class=\"stat\"><span class=\"label\">${{label}}</span><span class=\"value mono\">${{value ?? 'ΓÇö'}}</span></div>`;
         }}
 
         function tableFromRows(tableId, rows, columns) {{
@@ -273,7 +291,7 @@ def _build_ui_html(api_token: str) -> str:
                 return;
             }}
             const head = '<thead><tr>' + columns.map(c => `<th>${{c.label}}</th>`).join('') + '</tr></thead>';
-            const body = '<tbody>' + rows.map(row => '<tr>' + columns.map(c => `<td>${{row[c.key] ?? '—'}}</td>`).join('') + '</tr>').join('') + '</tbody>';
+            const body = '<tbody>' + rows.map(row => '<tr>' + columns.map(c => `<td>${{row[c.key] ?? 'ΓÇö'}}</td>`).join('') + '</tr>').join('') + '</tbody>';
             table.innerHTML = head + body;
         }}
 
@@ -301,10 +319,10 @@ def _build_ui_html(api_token: str) -> str:
             const decision = data.last_scan_decision || {{}};
             const route = decision.strategy_route || {{}};
             document.getElementById('decision-card').innerHTML = [
-                statCard('strategy', route.strategy_name || '—'),
-                statCard('confidence', route.confidence ?? '—'),
-                statCard('regime', decision.regime || '—'),
-                statCard('entry_quality', decision.entry_quality_score ?? '—'),
+                statCard('strategy', route.strategy_name || 'ΓÇö'),
+                statCard('confidence', route.confidence ?? 'ΓÇö'),
+                statCard('regime', decision.regime || 'ΓÇö'),
+                statCard('entry_quality', decision.entry_quality_score ?? 'ΓÇö'),
             ].join('');
 
             const positions = (data.positions || []).map(p => ({{
