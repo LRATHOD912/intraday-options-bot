@@ -94,12 +94,12 @@ class TestPositionManager(unittest.TestCase):
             self.assertEqual(reloaded["remaining_quantity"], 2)
             self.assertTrue(reloaded["took_1x_profit"])
 
-    def test_only_one_open_position(self):
+    def test_multiple_open_positions_and_targeted_close(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             json_path = Path(tmp_dir) / "positions.json"
             manager = PositionManager(str(json_path))
 
-            manager.open_position(
+            first = manager.open_position(
                 symbol="QQQ",
                 option_symbol="QQQ260705P00500000",
                 direction="PUT",
@@ -112,19 +112,67 @@ class TestPositionManager(unittest.TestCase):
                 order_id="order-put-1",
             )
 
-            with self.assertRaises(ValueError):
-                manager.open_position(
-                    symbol="QQQ",
-                    option_symbol="QQQ260705C00510000",
-                    direction="CALL",
-                    quantity=1,
-                    entry_price=2.10,
-                    stop_price=1.80,
-                    target_0=2.30,
-                    target_1=2.55,
-                    target_2=2.90,
-                    order_id="order-call-2",
-                )
+            second = manager.open_position(
+                symbol="QQQ",
+                option_symbol="QQQ260705C00510000",
+                direction="CALL",
+                quantity=2,
+                entry_price=2.10,
+                stop_price=1.80,
+                target_0=2.30,
+                target_1=2.55,
+                target_2=2.90,
+                order_id="order-call-2",
+            )
+
+            self.assertTrue(manager.has_open_position())
+            self.assertEqual(len(manager.get_open_positions()), 2)
+            self.assertEqual(manager.get_open_position()["position_id"], first["position_id"])
+            self.assertGreater(manager.get_total_open_risk(), 0.0)
+
+            closed_second = manager.close_position(position_id=second["position_id"], close_time="2026-07-05T10:25:00", exit_price=2.45)
+            self.assertIsNotNone(closed_second)
+            self.assertEqual(closed_second["position_id"], second["position_id"])
+            self.assertEqual(closed_second["status"], "CLOSED")
+            self.assertTrue(manager.has_open_position())
+            self.assertEqual(len(manager.get_open_positions()), 1)
+
+            reloaded_manager = PositionManager(str(json_path))
+            self.assertEqual(len(reloaded_manager.get_all_positions()), 2)
+            self.assertEqual(len(reloaded_manager.get_open_positions()), 1)
+
+            closed_all = reloaded_manager.close_all_positions(close_time="2026-07-05T10:30:00")
+            self.assertEqual(len(closed_all), 1)
+            self.assertFalse(reloaded_manager.has_open_position())
+
+    def test_legacy_single_position_payload_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            json_path = Path(tmp_dir) / "positions.json"
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "position": {
+                            "symbol": "QQQ",
+                            "option_symbol": "QQQ260705C00500000",
+                            "direction": "CALL",
+                            "quantity": 1,
+                            "entry_price": 2.15,
+                            "stop_price": 1.70,
+                            "target_0": 2.25,
+                            "target_1": 2.45,
+                            "target_2": 2.75,
+                            "order_id": "order-legacy",
+                        }
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            manager = PositionManager(str(json_path))
+
+            self.assertTrue(manager.has_open_position())
+            self.assertEqual(len(manager.get_open_positions()), 1)
+            self.assertEqual(manager.get_open_position()["order_id"], "order-legacy")
 
     def test_close_position_and_restart_state(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

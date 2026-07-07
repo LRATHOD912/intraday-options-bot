@@ -2,12 +2,14 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.analysis.candle_engine import analyze_candles
+from app.analysis.entry_quality import calculate_entry_quality_score
 from app.analysis.gap_fill_engine import analyze_gap_fill
 from app.analysis.market_internals import analyze_market_internals
 from app.analysis.market_structure import analyze_market_structure
 from app.analysis.momentum_engine import analyze_momentum
 from app.analysis.news_engine import analyze_news_risk
 from app.analysis.opening_range_engine import analyze_opening_range
+from app.analysis.regime_engine import analyze_regime
 from app.analysis.support_resistance import analyze_support_resistance
 from app.analysis.trend_engine import analyze_trend
 from app.analysis.volatility_engine import analyze_volatility
@@ -80,6 +82,16 @@ def run_intelligence_scan():
         analyze_news_risk(),
     ]
 
+    regime_result = analyze_regime(
+        qqq_bars,
+        opening_range_result=opening_range_result,
+        volume_result=analysis_results[6],
+        candle_result=analysis_results[8],
+        vix_price=vix_proxy_now,
+        news_result=analysis_results[-1],
+    )
+    analysis_results.insert(-2, regime_result)
+
     master_decision = aggregate_scores(analysis_results)
     risk = RiskManager()
     risk_allowed, risk_reason = risk.can_trade()
@@ -114,6 +126,23 @@ def run_intelligence_scan():
         trade_plan=trade_plan,
     )
 
+    regime_name = regime_result.get("data", {}).get("regime", "CHOPPY")
+    entry_quality = calculate_entry_quality_score(
+        decision=master_decision.get("decision"),
+        master_score=master_decision.get("total_score", 0),
+        trend_direction=analysis_results[4].get("direction"),
+        vwap_aligned=(latest["close"] > latest["vwap"]) if master_decision.get("decision") == "CALL" else (latest["close"] < latest["vwap"]),
+        ema_aligned=(latest["ema_9"] > latest["ema_20"]) if master_decision.get("decision") == "CALL" else (latest["ema_9"] < latest["ema_20"]),
+        opening_range_direction=opening_range_result.get("direction"),
+        market_structure_direction=market_structure_result.get("direction"),
+        volume_direction=analysis_results[6].get("direction"),
+        candle_direction=analysis_results[8].get("direction"),
+        momentum_direction=analysis_results[5].get("direction"),
+        support_resistance_direction=support_resistance_result.get("direction"),
+        gap_fill_direction=gap_fill_result.get("direction"),
+        regime=regime_name,
+    )
+
     print("\n========== Intelligence Engine Results ==========")
     for result in analysis_results:
         print(result)
@@ -133,6 +162,8 @@ def run_intelligence_scan():
         "gate_result": gate_result,
         "risk_allowed": risk_allowed,
         "risk_reason": risk_reason,
+        "entry_quality_score": entry_quality.get("entry_quality_score"),
+        "regime": regime_name,
     }
     log_decision(decision_payload)
     print("\n========== Decision Log ==========")

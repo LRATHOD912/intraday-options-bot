@@ -6,5 +6,43 @@ services:
     autoDeploy: true
     healthCheckPath: /health
     envVars:
+      - key: ENABLE_TRADING
+        value: "false"
+      - key: ALPACA_PAPER
+        value: "true"
       - key: USE_ALPACA_PAPER_EXECUTION
         value: "true"
+      - key: SIMULATE_POSITIONS
+        value: "false"
+      - key: ALLOW_MULTIPLE_POSITIONS
+        value: "true"
+      - key: MAX_OPEN_POSITIONS
+        value: "4"
+      - key: ALLOW_OPPOSITE_DIRECTION_POSITIONS
+        value: "false"
+      - key: ENABLE_HEDGE_MODE
+        value: "false"
+      - key: USE_BUDGET_POSITION_SIZING
+        value: "true"
+      - key: TRADE_BUDGET_PERCENT
+        value: "0.35"
+      - key: MIN_TRADE_BUDGET_PERCENT
+        value: "0.30"
+      - key: MAX_TRADE_BUDGET_PERCENT
+        value: "0.40"
+      - key: PAPER_ACCOUNT_SIZE
+        value: "10000"
+      - key: MAX_CONTRACTS_PER_TRADE
+        value: "10"
+      - key: MIN_CONTRACTS_PER_TRADE
+        value: "1"
+      - key: MAX_TOTAL_OPEN_RISK
+        value: "500"
+      - key: USE_REGIME_FILTER
+        value: "false"
+      - key: USE_DYNAMIC_POSITION_SIZE
+        value: "false"
+      - key: USE_TUNED_STAGED_EXITS
+        value: "false"
+      - key: EXIT_PROFILE
+        value: "baseline"

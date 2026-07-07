@@ -1,13 +1,17 @@
 import time
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from app.broker.orders import submit_option_sell_order
 from app.broker.paper_broker import submit_sell_order as submit_paper_sell_order
-from app.config import SIMULATE_POSITIONS
-from app.execution.position_manager import close_position, get_open_position, has_open_position, update_open_position
+from app.config import EXIT_PROFILE, SIMULATE_POSITIONS
+from app.execution.position_manager import close_position, get_open_position, get_open_positions, get_position, has_open_position, update_position
 from app.logs.trade_journal import log_trade_event
 from app.market.option_quote import get_option_market_price
+from app.analytics.performance_tracker import record_trade_event
 from app.risk.daily_risk_manager import record_realized_pnl
+from app.risk.strategy_control import record_strategy_event
 
 
 def _target_hit(direction: str, current_price: float, target_price: Optional[float]) -> bool:
@@ -62,7 +66,16 @@ def _record_exit_leg(event_type: str, open_pos: dict, quantity: int, exit_price:
     entry_price = float(open_pos.get("entry_price", 0.0))
     pnl = (exit_price - entry_price) * quantity * 100
     was_loss = pnl < 0
+    risk_per_contract = float(open_pos.get("risk_per_contract", 0.0) or 0.0)
+    r_multiple = (pnl / (risk_per_contract * quantity * 100)) if risk_per_contract > 0 and quantity > 0 else None
     record_realized_pnl(pnl=pnl, was_loss=was_loss)
+    record_trade_event(
+        pnl=pnl,
+        r_multiple=r_multiple,
+        regime=open_pos.get("regime"),
+        hour=(open_pos.get("entry_time", "")[:13] if open_pos.get("entry_time") else None),
+        setup_type=open_pos.get("setup_type", "default"),
+    )
     payload = {
         "symbol": open_pos.get("symbol"),
         "option_symbol": open_pos.get("option_symbol"),
@@ -77,14 +90,41 @@ def _record_exit_leg(event_type: str, open_pos: dict, quantity: int, exit_price:
         "broker": order_result.get("broker", "ALPACA"),
     }
     log_trade_event(event_type, payload)
+
+    strategy_name = open_pos.get("strategy_name")
+    hold_minutes = None
+    entry_time = open_pos.get("entry_time")
+    if entry_time:
+        try:
+            entry_dt = datetime.fromisoformat(str(entry_time))
+            exit_dt = datetime.now(ZoneInfo("America/New_York"))
+            if entry_dt.tzinfo is None:
+                entry_dt = entry_dt.replace(tzinfo=ZoneInfo("America/New_York"))
+            hold_minutes = max((exit_dt - entry_dt).total_seconds() / 60.0, 0.0)
+        except Exception:
+            hold_minutes = None
+
+    record_strategy_event(
+        strategy_name,
+        pnl=pnl,
+        r_multiple=r_multiple,
+        hold_minutes=hold_minutes,
+        regime=open_pos.get("regime"),
+        time_window=str(open_pos.get("strategy_time_window") or open_pos.get("setup_type") or "unknown"),
+        spread_slippage_issue=bool(open_pos.get("strategy_slippage_issue", False)),
+    )
     return payload
 
 
-def monitor_open_position_once() -> dict:
+def monitor_open_position_once(position_id: Optional[str] = None) -> dict:
     if not has_open_position():
         return {"status": "NO_POSITION", "message": "No open position"}
 
-    open_pos = get_open_position()
+    open_pos = get_position(position_id) if position_id else get_open_position()
+    if open_pos is None:
+        return {"status": "NO_POSITION", "message": "No open position"}
+
+    position_id = str(open_pos.get("position_id"))
     option_symbol = open_pos.get("option_symbol")
     direction = str(open_pos.get("direction", "CALL"))
     original_quantity = int(open_pos.get("original_quantity", open_pos.get("quantity", 1)))
@@ -115,7 +155,7 @@ def monitor_open_position_once() -> dict:
 
     current_option_price = float(option_quote["price"])
     if remaining_quantity <= 0:
-        closed_position = close_position(exit_price=current_option_price)
+        closed_position = close_position(position_id=position_id, exit_price=current_option_price)
         return {
             "status": "EXITED",
             "message": "Position already fully scaled out",
@@ -132,6 +172,7 @@ def monitor_open_position_once() -> dict:
     target_3x = open_pos.get("target_3x", open_pos.get("target_2"))
     target_4x = open_pos.get("target_4x")
     target_5x = float(entry_price + (5.0 * risk_per_contract)) if direction == "CALL" else float(entry_price - (5.0 * risk_per_contract))
+    profile = str(open_pos.get("exit_profile", EXIT_PROFILE)).lower()
 
     took_1x_profit = bool(open_pos.get("took_1x_profit", False))
     took_2x_profit = bool(open_pos.get("took_2x_profit", False))
@@ -147,6 +188,80 @@ def monitor_open_position_once() -> dict:
     qty_1x = 1
     qty_2x = 1
     qty_3x = 1
+    trail_mult = 1.5
+    if profile == "runner":
+        qty_1x = 0
+        qty_2x = max(1, int(round(original_quantity * 0.5)))
+        qty_3x = 0
+        trail_mult = 2.0
+    elif profile == "scalp":
+        qty_1x = max(1, remaining_quantity)
+        qty_2x = 0
+        qty_3x = 0
+
+    if profile == "baseline":
+        base_stop_hit = _stop_hit(direction, current_option_price, stop_price)
+        base_target_hit = _target_hit(direction, current_option_price, target_1x)
+        if base_stop_hit or base_target_hit:
+            reason = "stop_loss" if base_stop_hit else "target_1x"
+            order = _submit_exit_order(option_symbol, remaining_quantity, current_option_price)
+            if not order.get("submitted"):
+                return {
+                    "status": "HOLD",
+                    "message": "Baseline exit order not submitted",
+                    "position": open_pos,
+                    "quote": option_quote,
+                    "order_result": order,
+                }
+            event = "STOP_LOSS_EXIT" if base_stop_hit else "FINAL_EXIT"
+            leg_events.append(_record_exit_leg(event, open_pos, remaining_quantity, current_option_price, order, reason))
+            closed_position = close_position(position_id=position_id, exit_price=current_option_price)
+            return {
+                "status": "EXITED",
+                "message": "Baseline full exit",
+                "position": closed_position,
+                "quote": option_quote,
+                "order_result": order,
+                "events": leg_events,
+                "exit_reason": reason,
+            }
+        return {
+            "status": "HOLD",
+            "message": "Baseline hold",
+            "position": open_pos,
+            "quote": option_quote,
+        }
+
+    if profile == "scalp":
+        tight_stop = float(entry_price - (0.5 * risk_per_contract)) if direction == "CALL" else float(entry_price + (0.5 * risk_per_contract))
+        if _stop_hit(direction, current_option_price, tight_stop) or _target_hit(direction, current_option_price, target_1x):
+            reason = "scalp_tight_stop" if _stop_hit(direction, current_option_price, tight_stop) else "scalp_1r"
+            order = _submit_exit_order(option_symbol, remaining_quantity, current_option_price)
+            if not order.get("submitted"):
+                return {
+                    "status": "HOLD",
+                    "message": "Scalp exit order not submitted",
+                    "position": open_pos,
+                    "quote": option_quote,
+                    "order_result": order,
+                }
+            leg_events.append(_record_exit_leg("FINAL_EXIT", open_pos, remaining_quantity, current_option_price, order, reason))
+            closed_position = close_position(position_id=position_id, exit_price=current_option_price)
+            return {
+                "status": "EXITED",
+                "message": "Scalp full exit",
+                "position": closed_position,
+                "quote": option_quote,
+                "order_result": order,
+                "events": leg_events,
+                "exit_reason": reason,
+            }
+        return {
+            "status": "HOLD",
+            "message": "Scalp hold",
+            "position": open_pos,
+            "quote": option_quote,
+        }
 
     if _target_hit(direction, current_option_price, target_1x):
         if not stop_moved_to_breakeven:
@@ -157,12 +272,12 @@ def monitor_open_position_once() -> dict:
         if direction == "CALL":
             highest_price_seen = max(float(highest_price_seen or entry_price), current_option_price)
             updates["highest_price_seen"] = highest_price_seen
-            trailing_stop_price = max(entry_price, highest_price_seen - (1.5 * risk_per_contract))
+            trailing_stop_price = max(entry_price, highest_price_seen - (trail_mult * risk_per_contract))
             updates["trailing_stop_price"] = trailing_stop_price
         else:
             lowest_price_seen = min(float(lowest_price_seen or entry_price), current_option_price)
             updates["lowest_price_seen"] = lowest_price_seen
-            trailing_stop_price = min(entry_price, lowest_price_seen + (1.5 * risk_per_contract))
+            trailing_stop_price = min(entry_price, lowest_price_seen + (trail_mult * risk_per_contract))
             updates["trailing_stop_price"] = trailing_stop_price
 
         if not took_1x_profit:
@@ -191,12 +306,12 @@ def monitor_open_position_once() -> dict:
         if direction == "CALL":
             highest_price_seen = max(float(highest_price_seen or entry_price), current_option_price)
             updates["highest_price_seen"] = highest_price_seen
-            trailing_stop_price = max(entry_price, highest_price_seen - (1.5 * risk_per_contract))
+            trailing_stop_price = max(entry_price, highest_price_seen - (trail_mult * risk_per_contract))
             updates["trailing_stop_price"] = trailing_stop_price
         else:
             lowest_price_seen = min(float(lowest_price_seen or entry_price), current_option_price)
             updates["lowest_price_seen"] = lowest_price_seen
-            trailing_stop_price = min(entry_price, lowest_price_seen + (1.5 * risk_per_contract))
+            trailing_stop_price = min(entry_price, lowest_price_seen + (trail_mult * risk_per_contract))
             updates["trailing_stop_price"] = trailing_stop_price
 
     if stop_moved_to_breakeven and _target_hit(direction, current_option_price, target_2x) and not took_2x_profit and remaining_quantity > 0:
@@ -251,7 +366,7 @@ def monitor_open_position_once() -> dict:
             }
         final_payload = _record_exit_leg("STOP_LOSS_EXIT", open_pos, remaining_quantity, current_option_price, order_stop, "stop_loss")
         leg_events.append(final_payload)
-        closed_position = close_position(exit_price=current_option_price)
+        closed_position = close_position(position_id=position_id, exit_price=current_option_price)
         return {
             "status": "EXITED",
             "message": "Position closed at stop",
@@ -274,7 +389,7 @@ def monitor_open_position_once() -> dict:
             }
         final_payload = _record_exit_leg("FINAL_EXIT", open_pos, remaining_quantity, current_option_price, order_final, "target_5x_or_trail")
         leg_events.append(final_payload)
-        closed_position = close_position(exit_price=current_option_price)
+        closed_position = close_position(position_id=position_id, exit_price=current_option_price)
         return {
             "status": "EXITED",
             "message": "Position fully exited at final target",
@@ -300,7 +415,7 @@ def monitor_open_position_once() -> dict:
                 }
             final_payload = _record_exit_leg(event_type, open_pos, remaining_quantity, current_option_price, order_trail, "trail_or_breakeven")
             leg_events.append(final_payload)
-            closed_position = close_position(exit_price=current_option_price)
+            closed_position = close_position(position_id=position_id, exit_price=current_option_price)
             return {
                 "status": "EXITED",
                 "message": "Position fully exited by trailing/breakeven stop",
@@ -318,7 +433,7 @@ def monitor_open_position_once() -> dict:
     updates["took_2x_profit"] = bool(took_2x_profit)
     updates["took_3x_profit"] = bool(took_3x_profit)
 
-    updated_position = update_open_position(updates) if updates else open_pos
+    updated_position = update_position(position_id, updates) if updates else open_pos
 
     if leg_events:
         return {
@@ -337,6 +452,19 @@ def monitor_open_position_once() -> dict:
     }
 
 
+def monitor_all_open_positions_once() -> dict:
+    positions = get_open_positions()
+    if not positions:
+        return {"status": "NO_POSITION", "results": [], "message": "No open positions"}
+
+    results = []
+    for position in positions:
+        position_id = position.get("position_id")
+        results.append({"position_id": position_id, "result": monitor_open_position_once(position_id=position_id)})
+
+    return {"status": "OK", "results": results}
+
+
 def run_continuous_position_monitor(stop_event=None, poll_seconds: int = 5) -> dict:
     last_result = {"status": "NO_POSITION", "message": "No open position"}
     interval = max(int(poll_seconds), 1)
@@ -345,9 +473,7 @@ def run_continuous_position_monitor(stop_event=None, poll_seconds: int = 5) -> d
         if stop_event is not None and stop_event.is_set():
             return {"status": "STOPPED", "message": "Monitor stopped by request"}
 
-        last_result = monitor_open_position_once()
-        if last_result.get("status") == "EXITED":
-            return last_result
+        last_result = monitor_all_open_positions_once()
 
         time.sleep(interval)
 

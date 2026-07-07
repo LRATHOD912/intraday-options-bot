@@ -1,0 +1,41 @@
+{
+  "strategies": {
+    "MOMENTUM_BREAKOUT": {
+      "trades": 6,
+      "wins": 0,
+      "losses": 6,
+      "gross_profit": 0.0,
+      "gross_loss": 60.0,
+      "sum_r": -6.0,
+      "sum_hold_minutes": 0.0,
+      "max_drawdown": 60.0,
+      "equity_curve": [
+        -10.0,
+        -8.0,
+        -12.0,
+        -10.0,
+        -8.0,
+        -12.0
+      ],
+      "last_20_r": [
+        -1.0,
+        -0.8,
+        -1.2,
+        -1.0,
+        -0.8,
+        -1.2
+      ],
+      "consecutive_losses": 6,
+      "disabled": true,
+      "disabled_reason": "three_consecutive_losses",
+      "disabled_until": "2026-07-07",
+      "manual_enabled": true,
+      "time_windows": {},
+      "best_time_window": null,
+      "worst_time_window": null,
+      "spread_slippage_issues": 0,
+      "last_event_at": "2026-07-07T04:34:31.508377-04:00"
+    }
+  },
+  "updated_at": "2026-07-07T04:34:31.508377-04:00"
+}

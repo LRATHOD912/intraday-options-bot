@@ -5,7 +5,15 @@ from pathlib import Path
 from datetime import time
 from zoneinfo import ZoneInfo
 
-from app.config import USE_TUNED_STAGED_EXITS
+from app.analysis.entry_quality import calculate_entry_quality_score
+from app.analysis.regime_engine import analyze_regime
+from app.config import (
+    BACKTEST_SLIPPAGE_PERCENT,
+    EXIT_PROFILE,
+    MIN_ENTRY_QUALITY_SCORE,
+    USE_REGIME_FILTER,
+    USE_TUNED_STAGED_EXITS,
+)
 from app.analysis.candle_engine import analyze_candles
 from app.analysis.gap_fill_engine import analyze_gap_fill
 from app.analysis.market_internals import analyze_market_internals
@@ -41,7 +49,19 @@ def _format_avg_time(minutes_values):
     return f"{hours:02d}:{minutes:02d}"
 
 
-def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4):
+def _apply_slippage(price, decision, slippage_percent, side):
+    p = float(price)
+    slip = max(float(slippage_percent), 0.0)
+    if side == "entry":
+        if decision == "CALL":
+            return p * (1.0 + slip)
+        return p * (1.0 - slip)
+    if decision == "CALL":
+        return p * (1.0 - slip)
+    return p * (1.0 + slip)
+
+
+def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4, profile="balanced", slippage_percent=0.0):
     original_qty = max(int(quantity), 1)
     remaining_qty = original_qty
     risk = abs(float(entry) - float(stop))
@@ -93,9 +113,17 @@ def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3
 
         one_r_hit = (decision == "CALL" and high >= float(target_1x)) or (decision == "PUT" and low <= float(target_1x))
         if one_r_hit:
-            if not took_1x and qty_1x >= 1 and remaining_qty > 0:
+            if profile == "scalp" and remaining_qty > 0:
+                fill_px = _apply_slippage(target_1x, decision, slippage_percent, "exit")
+                realized_pnl += remaining_qty * pnl_contract(fill_px)
+                remaining_qty = 0
+                events.append("FINAL_EXIT")
+                break
+
+            if profile != "runner" and not took_1x and qty_1x >= 1 and remaining_qty > 0:
                 sell_qty = min(remaining_qty, qty_1x)
-                realized_pnl += sell_qty * pnl_contract(target_1x)
+                fill_px = _apply_slippage(target_1x, decision, slippage_percent, "exit")
+                realized_pnl += sell_qty * pnl_contract(fill_px)
                 remaining_qty -= sell_qty
                 events.append("PARTIAL_EXIT_1X")
                 took_1x = True
@@ -107,31 +135,38 @@ def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3
         if stop_moved_to_be and remaining_qty > 0:
             if decision == "CALL":
                 highest = max(highest, high)
-                trailing = max(float(entry), highest - (1.5 * risk))
+                trail_r = 2.0 if profile == "runner" else 1.5
+                trailing = max(float(entry), highest - (trail_r * risk))
             else:
                 lowest = min(lowest, low)
-                trailing = min(float(entry), lowest + (1.5 * risk))
+                trail_r = 2.0 if profile == "runner" else 1.5
+                trailing = min(float(entry), lowest + (trail_r * risk))
 
             two_r_hit = (decision == "CALL" and high >= float(target_2x)) or (decision == "PUT" and low <= float(target_2x))
             if two_r_hit and not took_2x:
-                sell_qty = min(remaining_qty, qty_2x)
+                if profile == "runner":
+                    sell_qty = min(remaining_qty, max(1, int(round(original_qty * 0.5))))
+                else:
+                    sell_qty = min(remaining_qty, qty_2x)
                 if sell_qty > 0:
-                    realized_pnl += sell_qty * pnl_contract(target_2x)
+                    fill_px = _apply_slippage(target_2x, decision, slippage_percent, "exit")
+                    realized_pnl += sell_qty * pnl_contract(fill_px)
                     remaining_qty -= sell_qty
                     events.append("PARTIAL_EXIT_2X")
                 took_2x = True
 
             three_r_hit = (decision == "CALL" and high >= float(target_3x)) or (decision == "PUT" and low <= float(target_3x))
-            if three_r_hit and remaining_qty > 0 and "PARTIAL_EXIT_3X" not in events:
+            if profile == "balanced" and three_r_hit and remaining_qty > 0 and "PARTIAL_EXIT_3X" not in events:
                 sell_qty = min(remaining_qty, qty_3x)
                 if sell_qty > 0:
-                    realized_pnl += sell_qty * pnl_contract(target_3x)
+                    fill_px = _apply_slippage(target_3x, decision, slippage_percent, "exit")
+                    realized_pnl += sell_qty * pnl_contract(fill_px)
                     remaining_qty -= sell_qty
                     events.append("PARTIAL_EXIT_3X")
 
             final_hit = (decision == "CALL" and high >= float(target_5x)) or (decision == "PUT" and low <= float(target_5x))
             if final_hit and remaining_qty > 0:
-                final_px = float(target_5x)
+                final_px = _apply_slippage(float(target_5x), decision, slippage_percent, "exit")
                 realized_pnl += remaining_qty * pnl_contract(final_px)
                 remaining_qty = 0
                 events.append("FINAL_EXIT")
@@ -139,7 +174,8 @@ def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3
 
             trail_hit = (decision == "CALL" and low <= float(trailing)) or (decision == "PUT" and high >= float(trailing))
             if trail_hit and remaining_qty > 0:
-                realized_pnl += remaining_qty * pnl_contract(trailing)
+                fill_px = _apply_slippage(trailing, decision, slippage_percent, "exit")
+                realized_pnl += remaining_qty * pnl_contract(fill_px)
                 remaining_qty = 0
                 if abs(float(trailing) - float(entry)) < 1e-9:
                     events.append("BREAKEVEN_EXIT")
@@ -153,7 +189,7 @@ def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3
 
     if remaining_qty > 0:
         if len(future_bars) > 0:
-            final_close = float(future_bars.iloc[-1]["close"])
+            final_close = _apply_slippage(float(future_bars.iloc[-1]["close"]), decision, slippage_percent, "exit")
             realized_pnl += remaining_qty * pnl_contract(final_close)
             remaining_qty = 0
             events.append("TIME_EXIT")
@@ -172,7 +208,7 @@ def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3
     }
 
 
-def _simulate_baseline_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4):
+def _simulate_baseline_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4, profile="baseline", slippage_percent=0.0):
     risk = abs(float(entry) - float(stop))
     if risk <= 0:
         return {
@@ -230,7 +266,15 @@ def run_backtest(
     session_end=time(12, 0),
     print_diagnostics=True,
     write_outputs=True,
+    overrides=None,
 ):
+    overrides = overrides or {}
+    use_regime_filter = bool(overrides.get("use_regime_filter", USE_REGIME_FILTER))
+    min_entry_quality = int(overrides.get("min_entry_quality_score", MIN_ENTRY_QUALITY_SCORE))
+    exit_profile = str(overrides.get("exit_profile", EXIT_PROFILE)).lower()
+    use_tuned = bool(overrides.get("use_tuned_staged_exits", USE_TUNED_STAGED_EXITS))
+    slippage_percent = float(overrides.get("slippage_percent", BACKTEST_SLIPPAGE_PERCENT))
+    option_filter_strictness = str(overrides.get("option_filter_strictness", "normal")).lower()
     eastern = ZoneInfo("America/New_York")
     end_time = datetime.now(eastern)
     start_time = end_time - timedelta(days=10)
@@ -294,6 +338,7 @@ def run_backtest(
     early_exit_rvol_values = []
     early_exit_body_values = []
     early_exit_entry_minutes = []
+    hold_bars_values = []
     skipped_counts = {
         "below_score": 0,
         "no_trade": 0,
@@ -374,6 +419,15 @@ def run_backtest(
             ),
             analyze_news_risk(),
         ]
+        regime_result = analyze_regime(
+            current_df,
+            opening_range_result=opening_range_result,
+            volume_result=volume_result,
+            candle_result=candle_result,
+            vix_price=vix_proxy_now,
+            news_result=analysis_results[-1],
+        )
+        analysis_results.insert(-2, regime_result)
 
         master_decision = aggregate_scores(analysis_results)
 
@@ -503,7 +557,45 @@ def run_backtest(
         quality_ok = master_decision.get("quality") in ["A", "A+"]
         rr_ok = bool(trade_plan.get("valid_rr"))
 
-        if not score_ok or not quality_ok:
+        regime_name = regime_result.get("data", {}).get("regime", "CHOPPY")
+        if use_regime_filter:
+            expected_regime = "TREND_UP" if decision == "CALL" else "TREND_DOWN"
+            breakout_ok = regime_result.get("direction") == ("bullish" if decision == "CALL" else "bearish")
+            if regime_name == "NEWS_RISK":
+                score_ok = False
+            elif regime_name in ["CHOPPY", "LOW_VOLATILITY"]:
+                align_ok = opening_range_dir == expected_dir and volume_dir == expected_dir and candle_dir in [expected_dir, "neutral"]
+                if not align_ok:
+                    score_ok = False
+            elif regime_name not in [expected_regime, "RANGE", "HIGH_VOLATILITY"] and not breakout_ok:
+                score_ok = False
+
+        entry_quality = calculate_entry_quality_score(
+            decision=decision,
+            master_score=master_decision.get("total_score", 0),
+            trend_direction=trend_dir,
+            vwap_aligned=(confirmation_close > float(latest["vwap"])) if decision == "CALL" else (confirmation_close < float(latest["vwap"])),
+            ema_aligned=(float(latest["ema_9"]) > float(latest["ema_20"])) if decision == "CALL" else (float(latest["ema_9"]) < float(latest["ema_20"])),
+            opening_range_direction=opening_range_dir,
+            market_structure_direction=market_structure_dir,
+            volume_direction=volume_dir,
+            candle_direction=candle_dir,
+            momentum_direction=momentum_dir,
+            support_resistance_direction=support_resistance_result.get("direction"),
+            gap_fill_direction=gap_fill_result.get("direction"),
+            regime=regime_name,
+        )
+        entry_quality_score = int(entry_quality.get("entry_quality_score", 0))
+        if option_filter_strictness == "strict":
+            entry_quality_score -= 5
+        elif option_filter_strictness == "loose":
+            entry_quality_score += 3
+
+        if entry_quality_score < min_entry_quality:
+            skipped_counts["below_score"] += 1
+            gate_allowed = False
+            gate_reason = "entry_quality_block"
+        elif not score_ok or not quality_ok:
             skipped_counts["below_score"] += 1
             gate_allowed = False
             gate_reason = "below_score"
@@ -542,7 +634,7 @@ def run_backtest(
             horizon = min(len(qqq_bars), signal_index + 10)
             future_bars = qqq_bars.iloc[signal_index:horizon]
 
-            simulator = _simulate_staged_trade if USE_TUNED_STAGED_EXITS else _simulate_baseline_trade
+            simulator = _simulate_staged_trade if use_tuned else _simulate_baseline_trade
             staged_result = simulator(
                 decision=decision,
                 entry=entry,
@@ -553,10 +645,13 @@ def run_backtest(
                 target_4x=target_4x,
                 future_bars=future_bars,
                 quantity=4,
+                profile=exit_profile,
+                slippage_percent=slippage_percent,
             )
             outcome = staged_result["outcome"]
             exit_reason = staged_result["exit_reason"]
             final_10_candle_return_percent = ((staged_result["realized_pnl"] / (entry * 4)) * 100) if entry > 0 else 0.0
+            hold_bars_values.append(len(staged_result.get("events", [])) if staged_result.get("events") else len(future_bars))
 
             if outcome == "win":
                 wins += 1
@@ -700,6 +795,8 @@ def run_backtest(
                 "target_2x": target_2x,
                 "target_3x": target_3x,
                 "target_4x": target_4x,
+                "entry_quality_score": entry_quality_score,
+                "regime": regime_name,
                 "outcome": outcome,
                 "exit_price": exit_price,
                 "exit_reason": exit_reason,
@@ -778,6 +875,7 @@ def run_backtest(
         "avg_time_exit_mfe": round(sum(time_exit_mfe_values) / len(time_exit_mfe_values), 4) if time_exit_mfe_values else 0.0,
         "avg_time_exit_mae": round(sum(time_exit_mae_values) / len(time_exit_mae_values), 4) if time_exit_mae_values else 0.0,
         "avg_time_exit_final_return": round(sum(time_exit_final_return_values) / len(time_exit_final_return_values), 4) if time_exit_final_return_values else 0.0,
+        "avg_hold_bars": round(sum(hold_bars_values) / len(hold_bars_values), 2) if hold_bars_values else 0.0,
     }
 
     daily_rows = []

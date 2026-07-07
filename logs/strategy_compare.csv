@@ -1,0 +1,9 @@
+config_name,trades,win_rate,avg_R,expectancy,profit_factor,max_drawdown,avg_profit,avg_loss,best_day,worst_day,comments
+quick|regime=False|entry_q=75|exit=baseline,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=False|entry_q=75|exit=balanced,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=False|entry_q=80|exit=baseline,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=False|entry_q=80|exit=balanced,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=True|entry_q=75|exit=baseline,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=True|entry_q=75|exit=balanced,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=True|entry_q=80|exit=baseline,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20
+quick|regime=True|entry_q=80|exit=balanced,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,,expectancy<=0;pf<=1.2;trades<20

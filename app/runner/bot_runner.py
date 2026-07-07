@@ -5,8 +5,8 @@ import threading
 from zoneinfo import ZoneInfo
 
 from app.config import BOT_END_TIME, BOT_LOOP_SECONDS, BOT_START_TIME
-from app.execution.live_monitor import run_continuous_position_monitor
-from app.execution.position_manager import has_open_position
+from app.execution.live_monitor import monitor_all_open_positions_once
+from app.execution.position_manager import get_open_positions
 from app.main import run_bot_scan
 
 
@@ -65,10 +65,10 @@ def _runner_loop(stop_event):
     )
 
     while not stop_event.is_set():
-        if has_open_position():
-            monitor_result = run_continuous_position_monitor(stop_event=stop_event, poll_seconds=5)
+        open_positions = get_open_positions()
+        if open_positions:
+            monitor_result = monitor_all_open_positions_once()
             _set_state(last_monitor_result=monitor_result)
-            continue
 
         now_et = datetime.now(eastern)
         if not _within_window(now_et, start_t, end_t):
