@@ -95,6 +95,13 @@ def _build_decision_history(limit: int = 100):
                 "decision": (row.get("master_decision") or {}).get("decision") or "NO_TRADE",
                 "confidence": trace.get("confidence"),
                 "entry_quality": trace.get("entry_quality") or row.get("entry_quality_score"),
+                "entry_quality_score": trace.get("entry_quality") or row.get("entry_quality_score"),
+                "adaptive_entry_threshold": trace.get("adaptive_entry_threshold") or row.get("adaptive_entry_threshold"),
+                "static_entry_threshold": trace.get("static_entry_threshold") or row.get("static_entry_threshold") or MIN_ENTRY_QUALITY_SCORE,
+                "entry_quality_passed": trace.get("entry_quality_passed") if trace.get("entry_quality_passed") is not None else row.get("entry_quality_passed"),
+                "entry_quality_gap": trace.get("entry_quality_gap") if trace.get("entry_quality_gap") is not None else row.get("entry_quality_gap"),
+                "regime_risk_multiplier": trace.get("regime_risk_multiplier") or row.get("regime_risk_multiplier"),
+                "regime_note": trace.get("regime_note") or row.get("regime_note"),
                 "accepted": bool(trace.get("accepted", (row.get("gate_result") or {}).get("allowed"))),
                 "reason": trace.get("reason") or (row.get("gate_result") or {}).get("reason"),
                 "reason_exact": trace.get("reason_exact") or row.get("rejection_reason") or trace.get("reason") or (row.get("gate_result") or {}).get("reason"),
@@ -186,6 +193,23 @@ def _build_dashboard_payload():
             or (latest_decision or {}).get("gate_result", {}).get("gate")
             or "none"
         )
+        adaptive_entry_threshold = (latest_decision or {}).get("adaptive_entry_threshold") or latest_trace.get("adaptive_entry_threshold")
+        static_entry_threshold = (latest_decision or {}).get("static_entry_threshold") or latest_trace.get("static_entry_threshold") or MIN_ENTRY_QUALITY_SCORE
+        entry_quality_value = latest_trace.get("entry_quality") or (latest_decision or {}).get("entry_quality_score")
+        entry_quality_passed = (latest_decision or {}).get("entry_quality_passed")
+        if entry_quality_passed is None and entry_quality_value is not None and adaptive_entry_threshold is not None:
+            try:
+                entry_quality_passed = float(entry_quality_value) >= float(adaptive_entry_threshold)
+            except (TypeError, ValueError):
+                entry_quality_passed = None
+        entry_quality_gap = (latest_decision or {}).get("entry_quality_gap")
+        if entry_quality_gap is None and entry_quality_value is not None and adaptive_entry_threshold is not None:
+            try:
+                entry_quality_gap = float(entry_quality_value) - float(adaptive_entry_threshold)
+            except (TypeError, ValueError):
+                entry_quality_gap = None
+        regime_risk_multiplier = (latest_decision or {}).get("regime_risk_multiplier") or latest_trace.get("regime_risk_multiplier")
+        regime_note = (latest_decision or {}).get("regime_note") or latest_trace.get("regime_note")
 
         strategy_state = strategy_status()
         strategy_perf = get_strategy_summary(limit=20)
@@ -235,6 +259,12 @@ def _build_dashboard_payload():
                         "exact_rejection_reason": exact_rejection_reason,
                         "rejected_by_gate": rejected_by_gate,
                         "next_retry_time": (latest_decision or {}).get("next_retry_at") or next_retry_time,
+                        "adaptive_entry_threshold": adaptive_entry_threshold,
+                        "static_entry_threshold": static_entry_threshold,
+                        "regime_risk_multiplier": regime_risk_multiplier,
+                        "regime_note": regime_note,
+                        "entry_quality_passed": entry_quality_passed,
+                        "entry_quality_gap": entry_quality_gap,
                 },
                 "positions": positions,
                 "risk": risk_state,
@@ -504,6 +534,12 @@ def _build_ui_html(api_token: str) -> str:
                 statCard('confidence', route.confidence ?? 'ΓÇö'),
                 statCard('regime', decision.regime || 'ΓÇö'),
                 statCard('entry_quality', decision.entry_quality_score ?? 'ΓÇö'),
+                statCard('adaptive_threshold', status.adaptive_entry_threshold ?? 'ΓÇö'),
+                statCard('static_threshold', status.static_entry_threshold ?? 'ΓÇö'),
+                statCard('regime_risk_multiplier', status.regime_risk_multiplier ?? 'ΓÇö'),
+                statCard('regime_note', status.regime_note || 'ΓÇö'),
+                statCard('entry_quality_passed', status.entry_quality_passed ? 'PASS' : 'FAIL'),
+                statCard('entry_quality_gap', status.entry_quality_gap ?? 'ΓÇö'),
                 statCard('trade_found', status.trade_found ? 'YES' : 'NO'),
                 statCard('trade_rejected', status.trade_rejected ? 'YES' : 'NO'),
                 statCard('rejected_by_gate', status.rejected_by_gate || 'none'),
@@ -725,6 +761,12 @@ def _build_public_dashboard_payload():
             "current_regime": decision.get("regime") or "Unknown",
             "strategy_confidence": strategy_route.get("confidence"),
             "entry_quality_score": decision.get("entry_quality_score"),
+            "adaptive_entry_threshold": status.get("adaptive_entry_threshold"),
+            "static_entry_threshold": status.get("static_entry_threshold"),
+            "regime_risk_multiplier": status.get("regime_risk_multiplier"),
+            "regime_note": status.get("regime_note"),
+            "entry_quality_passed": status.get("entry_quality_passed"),
+            "entry_quality_gap": status.get("entry_quality_gap"),
             "open_positions_count": status.get("open_positions_count", 0),
             "trade_found": status.get("trade_found"),
             "trade_rejected": status.get("trade_rejected"),
@@ -914,6 +956,12 @@ def _build_public_dashboard_html(view_token: str) -> str:
                     kpi('Active Strategy', status.active_strategy || strategy.current_strategy || 'No strategy selected yet'),
                     kpi('Strategy Confidence', status.strategy_confidence == null ? 'N/A' : fmt(status.strategy_confidence)),
                     kpi('Entry Quality', status.entry_quality_score == null ? 'N/A' : fmt(status.entry_quality_score)),
+                    kpi('Adaptive Threshold', status.adaptive_entry_threshold == null ? 'N/A' : fmt(status.adaptive_entry_threshold)),
+                    kpi('Static Threshold', status.static_entry_threshold == null ? 'N/A' : fmt(status.static_entry_threshold)),
+                    kpi('Risk Multiplier', status.regime_risk_multiplier == null ? 'N/A' : fmt(status.regime_risk_multiplier)),
+                    kpi('Regime Note', status.regime_note || 'N/A'),
+                    kpi('Entry Quality Result', status.entry_quality_passed ? 'PASS' : 'FAIL'),
+                    kpi('Entry Quality Gap', status.entry_quality_gap == null ? 'N/A' : fmt(status.entry_quality_gap)),
                     kpi('Trade Found', status.trade_found ? 'YES' : 'NO'),
                     kpi('Trade Rejected', status.trade_rejected ? 'YES' : 'NO'),
                     kpi('Rejected By Gate', status.rejected_by_gate || 'none'),
@@ -946,6 +994,12 @@ def _build_public_dashboard_html(view_token: str) -> str:
                     { key: 'decision', label: 'Decision' },
                     { key: 'confidence', label: 'Confidence' },
                     { key: 'entry_quality', label: 'Entry Quality' },
+                    { key: 'adaptive_entry_threshold', label: 'Adaptive Thresh' },
+                    { key: 'static_entry_threshold', label: 'Static Thresh' },
+                    { key: 'entry_quality_passed', label: 'EQ Pass' },
+                    { key: 'entry_quality_gap', label: 'EQ Gap' },
+                    { key: 'regime_risk_multiplier', label: 'Risk Mult' },
+                    { key: 'regime_note', label: 'Regime Note' },
                     { key: 'contract', label: 'Contract' },
                     { key: 'accepted', label: 'Accepted' },
                     { key: 'rejected_by_gate', label: 'Rejected By' },

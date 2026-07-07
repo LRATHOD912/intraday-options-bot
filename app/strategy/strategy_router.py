@@ -20,6 +20,7 @@ from app.config import (
     RANGE_SCALP_MAX_HOLD_MINUTES,
     VWAP_BOUNCE_MAX_HOLD_MINUTES,
 )
+from app.risk.regime_thresholds import get_entry_quality_threshold
 
 
 STRATEGIES = {
@@ -167,6 +168,7 @@ def route_strategy(
     gap_fill_direction: Optional[str] = None,
     price_near_support: Optional[bool] = None,
     price_near_resistance: Optional[bool] = None,
+    entry_quality_score: Optional[float] = None,
 ) -> dict[str, Any]:
     score = _get_score(master_score)
     regime_name = _get_regime_name(regime_result)
@@ -183,6 +185,8 @@ def route_strategy(
     ema_bullish = ema_9 is not None and ema_20 is not None and float(ema_9) > float(ema_20)
     ema_bearish = ema_9 is not None and ema_20 is not None and float(ema_9) < float(ema_20)
     spread_liquidity_ok = _liquidity_ok(option_spread_percent, option_liquidity_score)
+    very_tight_spread = option_spread_percent is None or float(option_spread_percent) <= 0.04
+    resolved_entry_quality = _to_float(entry_quality_score)
 
     if not spread_liquidity_ok:
         return _route(
@@ -202,6 +206,104 @@ def route_strategy(
             "NO_TRADE",
             confidence=min(score / 100.0, 0.5),
             reason="Master score below routing threshold",
+            required_exit_profile="baseline",
+            recommended_expiry_type="none",
+            risk_multiplier=0.0,
+            max_hold_minutes=0,
+        ).to_dict()
+
+    if regime_name == "LOW_VOLATILITY":
+        low_vol_threshold = float(get_entry_quality_threshold("LOW_VOLATILITY"))
+        if resolved_entry_quality is None or resolved_entry_quality < low_vol_threshold or not very_tight_spread:
+            return _route(
+                "NO_TRADE",
+                "NO_TRADE",
+                confidence=min(score / 100.0, 0.5),
+                reason="LOW_VOLATILITY requires entry_quality >= 80 and very tight spread",
+                required_exit_profile="baseline",
+                recommended_expiry_type="none",
+                risk_multiplier=0.0,
+                max_hold_minutes=0,
+            ).to_dict()
+
+    if regime_name == "CHOPPY":
+        if ENABLE_RANGE_SCALP_0DTE and _is_time_between(current_time_et, time(12, 45), time(14, 30)) and option_premium is not None and 0.30 <= float(option_premium) <= 1.50:
+            if price_near_support and candle_direction in ["bullish", "neutral"] and momentum_direction in ["bullish", "neutral"]:
+                return _route(
+                    "RANGE_SCALP_0DTE",
+                    "CALL",
+                    confidence=min(0.84, 0.48 + float(score) / 260.0),
+                    reason="CHOPPY regime routed to RANGE_SCALP_0DTE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=RANGE_SCALP_MAX_HOLD_MINUTES,
+                ).to_dict()
+            if price_near_resistance and candle_direction in ["bearish", "neutral"] and momentum_direction in ["bearish", "neutral"]:
+                return _route(
+                    "RANGE_SCALP_0DTE",
+                    "PUT",
+                    confidence=min(0.84, 0.48 + float(score) / 260.0),
+                    reason="CHOPPY regime routed to RANGE_SCALP_0DTE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=RANGE_SCALP_MAX_HOLD_MINUTES,
+                ).to_dict()
+
+        if ENABLE_MEAN_REVERSION_0DTE and option_premium is not None and float(option_premium) >= 0.50:
+            if vwap_distance_percent is not None and float(vwap_distance_percent) <= -0.008 and momentum_direction in ["bearish", "neutral"]:
+                return _route(
+                    "MEAN_REVERSION_0DTE",
+                    "CALL",
+                    confidence=min(0.8, 0.42 + abs(float(vwap_distance_percent)) * 14.0),
+                    reason="CHOPPY regime routed to MEAN_REVERSION_0DTE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=MEAN_REVERSION_MAX_HOLD_MINUTES,
+                ).to_dict()
+            if vwap_distance_percent is not None and float(vwap_distance_percent) >= 0.008 and momentum_direction in ["bullish", "neutral"]:
+                return _route(
+                    "MEAN_REVERSION_0DTE",
+                    "PUT",
+                    confidence=min(0.8, 0.42 + abs(float(vwap_distance_percent)) * 14.0),
+                    reason="CHOPPY regime routed to MEAN_REVERSION_0DTE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=MEAN_REVERSION_MAX_HOLD_MINUTES,
+                ).to_dict()
+
+        if ENABLE_VWAP_BOUNCE and _flat(vwap_distance_percent) and float(rvol or 0.0) >= 1.2 and float(candle_body_percent or 0.0) >= 0.4:
+            if float(vwap_distance_percent or 0.0) >= 0 and momentum_direction in ["bullish", "neutral"]:
+                return _route(
+                    "VWAP_BOUNCE",
+                    "CALL",
+                    confidence=min(0.86, 0.5 + float(score) / 260.0),
+                    reason="CHOPPY regime routed to high-confidence VWAP_BOUNCE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="same_day_or_next",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=VWAP_BOUNCE_MAX_HOLD_MINUTES,
+                ).to_dict()
+            if float(vwap_distance_percent or 0.0) <= 0 and momentum_direction in ["bearish", "neutral"]:
+                return _route(
+                    "VWAP_BOUNCE",
+                    "PUT",
+                    confidence=min(0.86, 0.5 + float(score) / 260.0),
+                    reason="CHOPPY regime routed to high-confidence VWAP_BOUNCE",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="same_day_or_next",
+                    risk_multiplier=0.6,
+                    max_hold_minutes=VWAP_BOUNCE_MAX_HOLD_MINUTES,
+                ).to_dict()
+
+        return _route(
+            "NO_TRADE",
+            "NO_TRADE",
+            confidence=min(0.45, max(0.0, float(score) / 200.0)),
+            reason="CHOPPY regime requires range/mean-reversion strategy, none enabled",
             required_exit_profile="baseline",
             recommended_expiry_type="none",
             risk_multiplier=0.0,
@@ -328,6 +430,30 @@ def route_strategy(
             ).to_dict()
 
     if regime_name == "REVERSAL":
+        if ENABLE_MEAN_REVERSION_0DTE and _is_time_between(current_time_et, time(12, 45), time(14, 30)) and option_premium is not None and float(option_premium) >= 0.50:
+            if vwap_distance_percent is not None and float(vwap_distance_percent) <= -0.008:
+                return _route(
+                    "MEAN_REVERSION_0DTE",
+                    "CALL",
+                    confidence=min(0.84, 0.45 + abs(float(vwap_distance_percent)) * 12.0),
+                    reason="REVERSAL regime routed to MEAN_REVERSION_0DTE in midday session",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.7,
+                    max_hold_minutes=MEAN_REVERSION_MAX_HOLD_MINUTES,
+                ).to_dict()
+            if vwap_distance_percent is not None and float(vwap_distance_percent) >= 0.008:
+                return _route(
+                    "MEAN_REVERSION_0DTE",
+                    "PUT",
+                    confidence=min(0.84, 0.45 + abs(float(vwap_distance_percent)) * 12.0),
+                    reason="REVERSAL regime routed to MEAN_REVERSION_0DTE in midday session",
+                    required_exit_profile="scalp",
+                    recommended_expiry_type="0DTE",
+                    risk_multiplier=0.7,
+                    max_hold_minutes=MEAN_REVERSION_MAX_HOLD_MINUTES,
+                ).to_dict()
+
         if vwap_distance_percent is not None and float(vwap_distance_percent) <= 0 and momentum_direction in ["bullish", "neutral"]:
             return _route(
                 "GAP_FILL_REVERSAL",

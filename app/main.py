@@ -26,6 +26,7 @@ from app.config import (
     ENABLE_TRADING,
     ENABLE_HEDGE_MODE,
     MAX_ENTRY_SPREAD_PERCENT,
+    MAX_CONTRACTS_PER_TRADE,
     MAX_OPTION_PRICE,
     MAX_OPEN_POSITIONS,
     MAX_TOTAL_OPEN_RISK,
@@ -75,6 +76,7 @@ from app.risk.position_sizing import build_position_sizing_decision, get_availab
 from app.risk.risk_manager import RiskManager
 from app.risk.daily_risk_manager import can_take_new_trade, record_new_trade, reset_if_new_day
 from app.risk.trade_gate import final_trade_gate
+from app.risk.regime_thresholds import get_entry_quality_threshold, get_regime_notes, get_regime_risk_multiplier
 from app.scoring.master_score import aggregate_scores
 from app.strategy.decision_engine import decide_final_trade
 from app.strategy.scoring import calculate_call_score, calculate_put_score
@@ -117,8 +119,14 @@ def _friendly_reject_reason(reason):
     text = str(reason or "")
     if text.startswith("entry_quality_below_threshold:"):
         parts = text.split(":")
+        if len(parts) == 4:
+            return f"Rejected because Entry Quality {parts[1]} < adaptive threshold {parts[2]} for {parts[3]}"
         if len(parts) == 3:
             return f"Rejected because Entry Quality {parts[1]} < threshold {parts[2]}"
+    if text.startswith("entry_quality_pass:"):
+        parts = text.split(":")
+        if len(parts) == 4:
+            return f"Entry Quality {parts[1]} >= adaptive threshold {parts[2]} for {parts[3]}"
     if text.startswith("regime_unmapped_strategy:"):
         parts = text.split(":", 2)
         if len(parts) == 3:
@@ -143,6 +151,12 @@ def _build_trace_payload(
     reason,
     reason_exact=None,
     rejected_by_gate=None,
+    adaptive_entry_threshold=None,
+    static_entry_threshold=None,
+    entry_quality_passed=None,
+    entry_quality_gap=None,
+    regime_risk_multiplier=None,
+    regime_note=None,
     selected_contract=None,
     spread_percent=None,
 ):
@@ -175,6 +189,12 @@ def _build_trace_payload(
             "reason_exact": resolved_reason,
             "reason_raw": reason,
             "rejected_by_gate": rejected_by_gate,
+            "adaptive_entry_threshold": adaptive_entry_threshold,
+            "static_entry_threshold": static_entry_threshold,
+            "entry_quality_passed": entry_quality_passed,
+            "entry_quality_gap": entry_quality_gap,
+            "regime_risk_multiplier": regime_risk_multiplier,
+            "regime_note": regime_note,
         }
     }
 
@@ -430,6 +450,10 @@ def run_bot_scan():
             gate_state["gate"] = gate_name
 
     regime_name = regime_result.get("data", {}).get("regime", "CHOPPY")
+    adaptive_threshold = int(get_entry_quality_threshold(regime_name))
+    static_threshold = int(MIN_ENTRY_QUALITY_SCORE)
+    regime_risk_multiplier = float(get_regime_risk_multiplier(regime_name))
+    regime_note = str(get_regime_notes(regime_name))
     if USE_REGIME_FILTER and master_decision.get("decision") in ["CALL", "PUT"]:
         trade_side = "bullish" if master_decision["decision"] == "CALL" else "bearish"
         breakout_ok = bool(regime_result.get("direction") == trade_side)
@@ -466,15 +490,31 @@ def run_bot_scan():
         regime=regime_name,
     )
     entry_quality_score = int(entry_quality.get("entry_quality_score", 0))
-    if master_decision.get("decision") in ["CALL", "PUT"] and entry_quality_score < int(MIN_ENTRY_QUALITY_SCORE):
-        _reject("entry_quality_gate", f"entry_quality_below_threshold:{entry_quality_score}:{int(MIN_ENTRY_QUALITY_SCORE)}")
+    entry_quality_passed = bool(entry_quality_score >= adaptive_threshold)
+    entry_quality_gap = int(entry_quality_score - adaptive_threshold)
+    if master_decision.get("decision") in ["CALL", "PUT"] and not entry_quality_passed:
+        _reject("entry_quality_gate", f"entry_quality_below_threshold:{entry_quality_score}:{adaptive_threshold}:{regime_name}")
         log_trade_event(
             "ENTRY_QUALITY_BLOCK",
             {
                 "symbol": "QQQ",
                 "decision": master_decision.get("decision"),
                 "entry_quality_score": entry_quality_score,
-                "threshold": int(MIN_ENTRY_QUALITY_SCORE),
+                "threshold": adaptive_threshold,
+                "static_threshold": static_threshold,
+                "regime": regime_name,
+            },
+        )
+    elif master_decision.get("decision") in ["CALL", "PUT"]:
+        log_trade_event(
+            "ENTRY_QUALITY_PASS",
+            {
+                "symbol": "QQQ",
+                "decision": master_decision.get("decision"),
+                "entry_quality_score": entry_quality_score,
+                "threshold": adaptive_threshold,
+                "regime": regime_name,
+                "note": _friendly_reject_reason(f"entry_quality_pass:{entry_quality_score}:{adaptive_threshold}:{regime_name}"),
             },
         )
 
@@ -524,6 +564,7 @@ def run_bot_scan():
             / max(abs(float(support_resistance_result.get("data", {}).get("resistance"))), 1.0)
             <= 0.003
         ),
+        entry_quality_score=entry_quality_score,
     )
 
     allowed = gate_state["allowed"]
@@ -538,6 +579,12 @@ def run_bot_scan():
         "risk_allowed": can_trade,
         "risk_reason": risk_reason,
         "entry_quality_score": entry_quality_score,
+        "adaptive_entry_threshold": adaptive_threshold,
+        "static_entry_threshold": static_threshold,
+        "entry_quality_passed": entry_quality_passed,
+        "entry_quality_gap": entry_quality_gap,
+        "regime_risk_multiplier": regime_risk_multiplier,
+        "regime_note": regime_note,
         "regime": regime_name,
         "strategy_route": strategy_route,
         "pause_status": get_pause_status(),
@@ -563,6 +610,12 @@ def run_bot_scan():
             reason=allow_reason,
             reason_exact=_friendly_reject_reason(allow_reason),
             rejected_by_gate=rejected_by_gate,
+            adaptive_entry_threshold=adaptive_threshold,
+            static_entry_threshold=static_threshold,
+            entry_quality_passed=entry_quality_passed,
+            entry_quality_gap=entry_quality_gap,
+            regime_risk_multiplier=regime_risk_multiplier,
+            regime_note=regime_note,
         )
     )
     log_decision(decision_payload)
@@ -590,6 +643,12 @@ def run_bot_scan():
                     reason=reason_code,
                     reason_exact=_friendly_reject_reason(reason_code),
                     rejected_by_gate=gate_name,
+                    adaptive_entry_threshold=adaptive_threshold,
+                    static_entry_threshold=static_threshold,
+                    entry_quality_passed=entry_quality_passed,
+                    entry_quality_gap=entry_quality_gap,
+                    regime_risk_multiplier=regime_risk_multiplier,
+                    regime_note=regime_note,
                     selected_contract=selected_contract,
                     spread_percent=spread_value,
                 ),
@@ -829,7 +888,8 @@ def run_bot_scan():
             }
             trade_quantity = max(int(POSITION_QUANTITY), 1)
             if USE_DYNAMIC_POSITION_SIZE:
-                trade_quantity = int(BASE_POSITION_QUANTITY)
+                base_quantity = int(BASE_POSITION_QUANTITY)
+                trade_quantity = base_quantity
                 if entry_quality_score >= 93:
                     trade_quantity = 4
                 elif entry_quality_score >= 85:
@@ -850,11 +910,27 @@ def run_bot_scan():
                 if float(perf.get("today", {}).get("realized_pnl", 0.0)) < 0:
                     trade_quantity = 1
 
-                trade_quantity = min(max(1, trade_quantity), int(MAX_POSITION_QUANTITY))
+                regime_adjusted = max(1, int(round(float(trade_quantity) * regime_risk_multiplier)))
+                trade_quantity = min(max(1, regime_adjusted), int(MAX_POSITION_QUANTITY), int(MAX_CONTRACTS_PER_TRADE))
+                log_trade_event(
+                    "REGIME_RISK_ADJUSTMENT",
+                    {
+                        "symbol": "QQQ",
+                        "decision": master_decision.get("decision"),
+                        "base_quantity": base_quantity,
+                        "calculated_quantity": regime_adjusted,
+                        "regime_multiplier": regime_risk_multiplier,
+                        "final_quantity": trade_quantity,
+                        "regime": regime_name,
+                        "regime_note": regime_note,
+                    },
+                )
 
             if USE_BUDGET_POSITION_SIZING:
                 budget_decision = build_position_sizing_decision(entry_price, buying_power=None, budget_percent=TRADE_BUDGET_PERCENT)
-                trade_quantity = int(budget_decision.get("quantity", 0))
+                base_budget_qty = int(budget_decision.get("quantity", 0))
+                regime_adjusted_budget_qty = max(1, int(round(float(base_budget_qty) * regime_risk_multiplier))) if base_budget_qty > 0 else 0
+                trade_quantity = min(max(regime_adjusted_budget_qty, 0), int(MAX_POSITION_QUANTITY), int(MAX_CONTRACTS_PER_TRADE))
                 log_trade_event(
                     "POSITION_SIZING_DECISION",
                     {
@@ -865,6 +941,9 @@ def run_bot_scan():
                         "trade_budget": budget_decision.get("trade_budget"),
                         "contract_cost": budget_decision.get("contract_cost"),
                         "quantity": trade_quantity,
+                        "base_quantity": base_budget_qty,
+                        "regime_multiplier": regime_risk_multiplier,
+                        "regime_note": regime_note,
                         "budget_percent": TRADE_BUDGET_PERCENT,
                         "reason": budget_decision.get("reason"),
                     },

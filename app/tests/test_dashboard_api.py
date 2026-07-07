@@ -66,12 +66,31 @@ class TestDashboardApi(unittest.TestCase):
                 "exact_rejection_reason": "Rejected because Entry Quality 48 < threshold 75",
                 "rejected_by_gate": "entry_quality_gate",
                 "next_retry_time": "2026-01-01T09:46:00-05:00",
+                "adaptive_entry_threshold": 62,
+                "static_entry_threshold": 75,
+                "regime_risk_multiplier": 0.5,
+                "regime_note": "Reduced threshold, reduced size, quick exits only",
+                "entry_quality_passed": False,
+                "entry_quality_gap": -14,
             },
             "positions": [],
             "risk": {},
             "orders": [],
             "journal": [],
-            "decision_history": [{"timestamp": "2026-01-01T09:45:00-05:00", "symbol": "QQQ", "reason": "No valid setup", "reason_exact": "Rejected because Entry Quality 48 < threshold 75", "rejected_by_gate": "entry_quality_gate"}],
+            "decision_history": [{
+                "timestamp": "2026-01-01T09:45:00-05:00",
+                "symbol": "QQQ",
+                "reason": "No valid setup",
+                "reason_exact": "Rejected because Entry Quality 48 < threshold 75",
+                "rejected_by_gate": "entry_quality_gate",
+                "entry_quality_score": 48,
+                "adaptive_entry_threshold": 62,
+                "static_entry_threshold": 75,
+                "entry_quality_passed": False,
+                "entry_quality_gap": -14,
+                "regime_risk_multiplier": 0.5,
+                "regime_note": "Reduced threshold, reduced size, quick exits only",
+            }],
             "last_scan_decision": {},
         },
     )
@@ -94,6 +113,14 @@ class TestDashboardApi(unittest.TestCase):
         self.assertTrue(body["status"]["trade_rejected"])
         self.assertEqual(body["status"]["rejected_by_gate"], "entry_quality_gate")
         self.assertIn("Entry Quality 48 < threshold 75", body["status"]["exact_rejection_reason"])
+        self.assertEqual(body["status"]["adaptive_entry_threshold"], 62)
+        self.assertEqual(body["status"]["static_entry_threshold"], 75)
+        self.assertEqual(body["status"]["regime_risk_multiplier"], 0.5)
+        self.assertIn("Reduced threshold", body["status"]["regime_note"])
+        self.assertFalse(body["status"]["entry_quality_passed"])
+        self.assertEqual(body["status"]["entry_quality_gap"], -14)
+        self.assertIn("adaptive_entry_threshold", body["decision_history"][0])
+        self.assertIn("entry_quality_score", body["decision_history"][0])
         self.assertNotIn("API_TOKEN", response.text)
         self.assertNotIn("X-API-Token", response.text)
 
