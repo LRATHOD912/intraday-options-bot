@@ -492,7 +492,7 @@ def _build_ui_html(api_token: str) -> str:
         }}
 
         function statCard(label, value) {{
-            return `<div class=\"stat\"><span class=\"label\">${{label}}</span><span class=\"value mono\">${{value ?? 'ΓÇö'}}</span></div>`;
+            return `<div class=\"stat\"><span class=\"label\">${{label}}</span><span class=\"value mono\">${{value ?? 'N/A'}}</span></div>`;
         }}
 
         function tableFromRows(tableId, rows, columns) {{
@@ -502,7 +502,7 @@ def _build_ui_html(api_token: str) -> str:
                 return;
             }}
             const head = '<thead><tr>' + columns.map(c => `<th>${{c.label}}</th>`).join('') + '</tr></thead>';
-            const body = '<tbody>' + rows.map(row => '<tr>' + columns.map(c => `<td>${{row[c.key] ?? 'ΓÇö'}}</td>`).join('') + '</tr>').join('') + '</tbody>';
+            const body = '<tbody>' + rows.map(row => '<tr>' + columns.map(c => `<td>${{row[c.key] ?? 'N/A'}}</td>`).join('') + '</tr>').join('') + '</tbody>';
             table.innerHTML = head + body;
         }}
 
@@ -530,16 +530,16 @@ def _build_ui_html(api_token: str) -> str:
             const decision = data.last_scan_decision || {{}};
             const route = decision.strategy_route || {{}};
             document.getElementById('decision-card').innerHTML = [
-                statCard('strategy', route.strategy_name || 'ΓÇö'),
-                statCard('confidence', route.confidence ?? 'ΓÇö'),
-                statCard('regime', decision.regime || 'ΓÇö'),
-                statCard('entry_quality', decision.entry_quality_score ?? 'ΓÇö'),
-                statCard('adaptive_threshold', status.adaptive_entry_threshold ?? 'ΓÇö'),
-                statCard('static_threshold', status.static_entry_threshold ?? 'ΓÇö'),
-                statCard('regime_risk_multiplier', status.regime_risk_multiplier ?? 'ΓÇö'),
-                statCard('regime_note', status.regime_note || 'ΓÇö'),
+                statCard('strategy', status.current_strategy || route.strategy_name || 'N/A'),
+                statCard('confidence', status.current_confidence ?? route.confidence ?? 'N/A'),
+                statCard('regime', status.current_regime || decision.regime || 'N/A'),
+                statCard('entry_quality', status.current_entry_quality ?? decision.entry_quality_score ?? 'N/A'),
+                statCard('adaptive_threshold', status.adaptive_entry_threshold ?? 'N/A'),
+                statCard('static_threshold', status.static_entry_threshold ?? 'N/A'),
+                statCard('regime_risk_multiplier', status.regime_risk_multiplier ?? 'N/A'),
+                statCard('regime_note', status.regime_note || 'N/A'),
                 statCard('entry_quality_passed', status.entry_quality_passed ? 'PASS' : 'FAIL'),
-                statCard('entry_quality_gap', status.entry_quality_gap ?? 'ΓÇö'),
+                statCard('entry_quality_gap', status.entry_quality_gap ?? 'N/A'),
                 statCard('trade_found', status.trade_found ? 'YES' : 'NO'),
                 statCard('trade_rejected', status.trade_rejected ? 'YES' : 'NO'),
                 statCard('rejected_by_gate', status.rejected_by_gate || 'none'),

@@ -278,12 +278,25 @@ def run_bot_scan():
         log_decision(
             {
                 "master_decision": {"decision": "NO_TRADE", "total_score": 0},
-                "gate_result": {"allowed": False, "reason": "market_closed"},
+                "gate_result": {"allowed": False, "reason": "market_closed", "gate": "market_hours_gate"},
+                "trade_found": False,
+                "trade_rejected": True,
+                "rejected_by_gate": "market_hours_gate",
+                "rejection_reason": _friendly_reject_reason("market_closed"),
+                "next_retry_at": (datetime.now(ZoneInfo("America/New_York")) + timedelta(seconds=60)).isoformat(),
                 "trace": {
                     "symbol": "QQQ",
                     "accepted": False,
                     "reason": _friendly_reject_reason("market_closed"),
                     "reason_raw": market_reason,
+                    "reason_exact": _friendly_reject_reason("market_closed"),
+                    "rejected_by_gate": "market_hours_gate",
+                    "adaptive_entry_threshold": None,
+                    "static_entry_threshold": int(MIN_ENTRY_QUALITY_SCORE),
+                    "entry_quality_passed": None,
+                    "entry_quality_gap": None,
+                    "regime_risk_multiplier": None,
+                    "regime_note": None,
                 },
             }
         )
@@ -304,12 +317,25 @@ def run_bot_scan():
         log_decision(
             {
                 "master_decision": {"decision": "NO_TRADE", "total_score": 0},
-                "gate_result": {"allowed": False, "reason": "outside_strategy_window"},
+                "gate_result": {"allowed": False, "reason": "outside_strategy_window", "gate": "strategy_window_gate"},
+                "trade_found": False,
+                "trade_rejected": True,
+                "rejected_by_gate": "strategy_window_gate",
+                "rejection_reason": _friendly_reject_reason("outside_strategy_window"),
+                "next_retry_at": (datetime.now(ZoneInfo("America/New_York")) + timedelta(seconds=60)).isoformat(),
                 "trace": {
                     "symbol": "QQQ",
                     "accepted": False,
                     "reason": _friendly_reject_reason("outside_strategy_window"),
                     "reason_raw": "outside_strategy_window",
+                    "reason_exact": _friendly_reject_reason("outside_strategy_window"),
+                    "rejected_by_gate": "strategy_window_gate",
+                    "adaptive_entry_threshold": None,
+                    "static_entry_threshold": int(MIN_ENTRY_QUALITY_SCORE),
+                    "entry_quality_passed": None,
+                    "entry_quality_gap": None,
+                    "regime_risk_multiplier": None,
+                    "regime_note": None,
                 },
             }
         )

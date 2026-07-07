@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -25,6 +26,21 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(response.media_type, "text/html")
         self.assertIn("Intraday Options Bot", response.body.decode("utf-8"))
         self.assertIn("/dashboard?api_token=", response.body.decode("utf-8"))
+        self.assertNotIn("ΓÇ", response.body.decode("utf-8"))
+
+    @patch("app.main.is_market_hours", return_value=(False, "market_closed"))
+    @patch("app.main.log_decision")
+    def test_early_market_closed_rejection_includes_gate_metadata(self, mock_log_decision, _mock_market_hours):
+        from app.main import run_bot_scan
+
+        run_bot_scan()
+
+        payload = mock_log_decision.call_args[0][0]
+        self.assertFalse(payload["trade_found"])
+        self.assertTrue(payload["trade_rejected"])
+        self.assertEqual(payload["rejected_by_gate"], "market_hours_gate")
+        self.assertEqual(payload["gate_result"]["gate"], "market_hours_gate")
+        self.assertEqual(payload["trace"]["rejected_by_gate"], "market_hours_gate")
 
     @patch("app.server.api.VIEW_TOKEN", "test-view-token")
     def test_public_view_rejects_invalid_token(self):
