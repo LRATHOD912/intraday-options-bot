@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import time
 from zoneinfo import ZoneInfo
 
+from app.config import USE_TUNED_STAGED_EXITS
 from app.analysis.candle_engine import analyze_candles
 from app.analysis.gap_fill_engine import analyze_gap_fill
 from app.analysis.market_internals import analyze_market_internals
@@ -38,6 +39,190 @@ def _format_avg_time(minutes_values):
         hours += 1
         minutes = 0
     return f"{hours:02d}:{minutes:02d}"
+
+
+def _simulate_staged_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4):
+    original_qty = max(int(quantity), 1)
+    remaining_qty = original_qty
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return {
+            "outcome": "no_exit",
+            "exit_reason": "invalid_risk",
+            "realized_pnl": 0.0,
+            "r_multiple": 0.0,
+            "remaining_qty": remaining_qty,
+            "events": [],
+        }
+
+    took_1x = False
+    took_2x = False
+    stop_moved_to_be = False
+    highest = float(entry)
+    lowest = float(entry)
+    trailing = None
+    realized_pnl = 0.0
+    events = []
+
+    qty_1x = 1
+    qty_2x = 1
+    qty_3x = 1
+    target_5x = float(entry + (5.0 * risk)) if decision == "CALL" else float(entry - (5.0 * risk))
+
+    def pnl_contract(exit_px):
+        if decision == "PUT":
+            return float(entry) - float(exit_px)
+        return float(exit_px) - float(entry)
+
+    for bar in future_bars.itertuples(index=False):
+        high = float(bar.high)
+        low = float(bar.low)
+        close = float(bar.close)
+
+        if not stop_moved_to_be:
+            if decision == "CALL" and low <= float(stop):
+                realized_pnl += remaining_qty * pnl_contract(stop)
+                remaining_qty = 0
+                events.append("STOP_LOSS_EXIT")
+                break
+            if decision == "PUT" and high >= float(stop):
+                realized_pnl += remaining_qty * pnl_contract(stop)
+                remaining_qty = 0
+                events.append("STOP_LOSS_EXIT")
+                break
+
+        one_r_hit = (decision == "CALL" and high >= float(target_1x)) or (decision == "PUT" and low <= float(target_1x))
+        if one_r_hit:
+            if not took_1x and qty_1x >= 1 and remaining_qty > 0:
+                sell_qty = min(remaining_qty, qty_1x)
+                realized_pnl += sell_qty * pnl_contract(target_1x)
+                remaining_qty -= sell_qty
+                events.append("PARTIAL_EXIT_1X")
+                took_1x = True
+            elif original_qty == 1:
+                took_1x = True
+
+            stop_moved_to_be = True
+
+        if stop_moved_to_be and remaining_qty > 0:
+            if decision == "CALL":
+                highest = max(highest, high)
+                trailing = max(float(entry), highest - (1.5 * risk))
+            else:
+                lowest = min(lowest, low)
+                trailing = min(float(entry), lowest + (1.5 * risk))
+
+            two_r_hit = (decision == "CALL" and high >= float(target_2x)) or (decision == "PUT" and low <= float(target_2x))
+            if two_r_hit and not took_2x:
+                sell_qty = min(remaining_qty, qty_2x)
+                if sell_qty > 0:
+                    realized_pnl += sell_qty * pnl_contract(target_2x)
+                    remaining_qty -= sell_qty
+                    events.append("PARTIAL_EXIT_2X")
+                took_2x = True
+
+            three_r_hit = (decision == "CALL" and high >= float(target_3x)) or (decision == "PUT" and low <= float(target_3x))
+            if three_r_hit and remaining_qty > 0 and "PARTIAL_EXIT_3X" not in events:
+                sell_qty = min(remaining_qty, qty_3x)
+                if sell_qty > 0:
+                    realized_pnl += sell_qty * pnl_contract(target_3x)
+                    remaining_qty -= sell_qty
+                    events.append("PARTIAL_EXIT_3X")
+
+            final_hit = (decision == "CALL" and high >= float(target_5x)) or (decision == "PUT" and low <= float(target_5x))
+            if final_hit and remaining_qty > 0:
+                final_px = float(target_5x)
+                realized_pnl += remaining_qty * pnl_contract(final_px)
+                remaining_qty = 0
+                events.append("FINAL_EXIT")
+                break
+
+            trail_hit = (decision == "CALL" and low <= float(trailing)) or (decision == "PUT" and high >= float(trailing))
+            if trail_hit and remaining_qty > 0:
+                realized_pnl += remaining_qty * pnl_contract(trailing)
+                remaining_qty = 0
+                if abs(float(trailing) - float(entry)) < 1e-9:
+                    events.append("BREAKEVEN_EXIT")
+                else:
+                    events.append("TRAILING_STOP_EXIT")
+                break
+
+        if remaining_qty > 0 and len(events) == 0:
+            # Keep track for trailing progression even when 1R has not been reached yet.
+            _ = close
+
+    if remaining_qty > 0:
+        if len(future_bars) > 0:
+            final_close = float(future_bars.iloc[-1]["close"])
+            realized_pnl += remaining_qty * pnl_contract(final_close)
+            remaining_qty = 0
+            events.append("TIME_EXIT")
+        else:
+            events.append("NO_EXIT")
+
+    r_multiple = realized_pnl / (risk * original_qty) if risk > 0 else 0.0
+    outcome = "win" if realized_pnl > 0 else "loss" if realized_pnl < 0 else "flat"
+    return {
+        "outcome": outcome,
+        "exit_reason": events[-1] if events else "NO_EXIT",
+        "realized_pnl": float(realized_pnl),
+        "r_multiple": float(r_multiple),
+        "remaining_qty": int(remaining_qty),
+        "events": events,
+    }
+
+
+def _simulate_baseline_trade(decision, entry, stop, target_1x, target_2x, target_3x, target_4x, future_bars, quantity=4):
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return {
+            "outcome": "flat",
+            "exit_reason": "invalid_risk",
+            "realized_pnl": 0.0,
+            "r_multiple": 0.0,
+            "remaining_qty": int(quantity),
+            "events": ["NO_EXIT"],
+        }
+
+    exit_px = None
+    exit_reason = "TIME_EXIT"
+    for bar in future_bars.itertuples(index=False):
+        high = float(bar.high)
+        low = float(bar.low)
+        if decision == "CALL":
+            if low <= float(stop):
+                exit_px = float(stop)
+                exit_reason = "STOP_LOSS_EXIT"
+                break
+            if high >= float(target_1x):
+                exit_px = float(target_1x)
+                exit_reason = "FINAL_EXIT"
+                break
+        else:
+            if high >= float(stop):
+                exit_px = float(stop)
+                exit_reason = "STOP_LOSS_EXIT"
+                break
+            if low <= float(target_1x):
+                exit_px = float(target_1x)
+                exit_reason = "FINAL_EXIT"
+                break
+
+    if exit_px is None:
+        exit_px = float(future_bars.iloc[-1]["close"]) if len(future_bars) > 0 else float(entry)
+
+    qty = max(int(quantity), 1)
+    realized_pnl = (float(entry) - float(exit_px)) * qty if decision == "PUT" else (float(exit_px) - float(entry)) * qty
+    r_multiple = realized_pnl / (risk * qty) if risk > 0 else 0.0
+    outcome = "win" if realized_pnl > 0 else "loss" if realized_pnl < 0 else "flat"
+    return {
+        "outcome": outcome,
+        "exit_reason": exit_reason,
+        "realized_pnl": float(realized_pnl),
+        "r_multiple": float(r_multiple),
+        "remaining_qty": 0,
+        "events": [exit_reason],
+    }
 
 
 def run_backtest(
@@ -337,7 +522,14 @@ def run_backtest(
             rr_2_values.append(float(trade_plan.get("rr_2", 0.0)))
             cooldown_remaining = 10
             entry = float(trade_plan["entry"])
-            target_0 = float(trade_plan.get("target_0")) if trade_plan.get("target_0") is not None else (entry * 1.0015 if decision == "CALL" else entry * 0.9985)
+            stop_px = float(trade_plan.get("stop", entry))
+            risk_px = float(trade_plan.get("risk_per_share", abs(entry - stop_px)))
+            target_1x = float(trade_plan.get("target_1x", trade_plan.get("target_0", entry + risk_px if decision == "CALL" else entry - risk_px)))
+            target_2x = float(trade_plan.get("target_2x", trade_plan.get("target_1", entry + (2 * risk_px) if decision == "CALL" else entry - (2 * risk_px))))
+            target_3x = float(trade_plan.get("target_3x", trade_plan.get("target_2", entry + (3 * risk_px) if decision == "CALL" else entry - (3 * risk_px))))
+            target_4x = trade_plan.get("target_4x")
+
+            target_0 = target_1x
             outcome = "time_exit"
             exit_price = None
             exit_reason = None
@@ -350,43 +542,21 @@ def run_backtest(
             horizon = min(len(qqq_bars), signal_index + 10)
             future_bars = qqq_bars.iloc[signal_index:horizon]
 
-            for idx, future_bar in enumerate(future_bars.itertuples(index=False), start=1):
-                if decision == "CALL":
-                    if future_bar.high >= target_0:
-                        outcome = "win"
-                        exit_price = float(future_bar.high)
-                        exit_reason = "target_0_hit"
-                        break
-                    if future_bar.low <= trade_plan["stop"]:
-                        outcome = "loss"
-                        exit_price = float(future_bar.low)
-                        exit_reason = "stop_hit"
-                        break
-                    current_return_percent = ((float(future_bar.close) - entry) / entry) * 100
-                    if idx >= 3 and current_return_percent < 0:
-                        outcome = "early_exit"
-                        exit_price = float(future_bar.close)
-                        exit_reason = "early_weakness"
-                        early_exit_return_percent = current_return_percent
-                        break
-                elif decision == "PUT":
-                    if future_bar.low <= target_0:
-                        outcome = "win"
-                        exit_price = float(future_bar.low)
-                        exit_reason = "target_0_hit"
-                        break
-                    if future_bar.high >= trade_plan["stop"]:
-                        outcome = "loss"
-                        exit_price = float(future_bar.high)
-                        exit_reason = "stop_hit"
-                        break
-                    current_return_percent = ((entry - float(future_bar.close)) / entry) * 100
-                    if idx >= 3 and current_return_percent < 0:
-                        outcome = "early_exit"
-                        exit_price = float(future_bar.close)
-                        exit_reason = "early_weakness"
-                        early_exit_return_percent = current_return_percent
-                        break
+            simulator = _simulate_staged_trade if USE_TUNED_STAGED_EXITS else _simulate_baseline_trade
+            staged_result = simulator(
+                decision=decision,
+                entry=entry,
+                stop=stop_px,
+                target_1x=target_1x,
+                target_2x=target_2x,
+                target_3x=target_3x,
+                target_4x=target_4x,
+                future_bars=future_bars,
+                quantity=4,
+            )
+            outcome = staged_result["outcome"]
+            exit_reason = staged_result["exit_reason"]
+            final_10_candle_return_percent = ((staged_result["realized_pnl"] / (entry * 4)) * 100) if entry > 0 else 0.0
 
             if outcome == "win":
                 wins += 1
@@ -405,6 +575,8 @@ def run_backtest(
             elif outcome == "loss":
                 losses += 1
                 daily_stats[trade_date]["losses"] += 1
+            elif outcome == "flat":
+                flat_exit += 1
             elif outcome == "early_exit":
                 early_exit += 1
                 daily_stats[trade_date]["early_exit"] += 1
@@ -524,9 +696,16 @@ def run_backtest(
                 "signal_close": signal_close,
                 "confirmation_close": confirmation_close,
                 "target_0": target_0,
+                "target_1x": target_1x,
+                "target_2x": target_2x,
+                "target_3x": target_3x,
+                "target_4x": target_4x,
                 "outcome": outcome,
                 "exit_price": exit_price,
                 "exit_reason": exit_reason,
+                "staged_events": staged_result.get("events", []),
+                "realized_pnl": staged_result.get("realized_pnl", 0.0),
+                "r_multiple": staged_result.get("r_multiple", 0.0),
                 "early_exit_return_percent": early_exit_return_percent,
                 "max_favorable_move_percent": max_favorable_move_percent,
                 "max_adverse_move_percent": max_adverse_move_percent,

@@ -14,11 +14,11 @@ from app.analysis.volatility_engine import analyze_volatility
 from app.analysis.volatility_engine import calculate_atr
 from app.analysis.volume_engine import analyze_volume
 from app.broker.paper_broker import submit_buy_order as submit_paper_buy_order
-from app.broker.paper_broker import submit_sell_order as submit_paper_sell_order
-from app.broker.orders import submit_option_buy_order, submit_option_sell_order
-from app.config import ENABLE_TRADING, SIMULATE_POSITIONS
+from app.broker.orders import submit_option_buy_order
+from app.config import ENABLE_TRADING, POSITION_QUANTITY, SIMULATE_POSITIONS
+from app.execution.live_monitor import monitor_open_position_once
 from app.execution.monitor import check_exit_rules
-from app.execution.position_manager import close_position, get_open_position, has_open_position, open_position
+from app.execution.position_manager import get_open_position, has_open_position, open_position
 from app.execution.trade_manager import build_trade_decision
 from app.indicators.indicators import (
     calculate_ema,
@@ -35,12 +35,11 @@ from app.market.levels import (
     detect_breakout,
     detect_breakdown,
 )
-from app.market.option_quote import get_option_market_price
 from app.market.market_data import get_1min_bars, get_latest_prices, get_market_internal_price
 from app.market.options_selector import choose_best_contract
 from app.planning.trade_plan import build_trade_plan
 from app.risk.risk_manager import RiskManager
-from app.risk.daily_risk_manager import can_take_new_trade, record_trade_result, reset_if_new_day
+from app.risk.daily_risk_manager import can_take_new_trade, record_new_trade, reset_if_new_day
 from app.risk.trade_gate import final_trade_gate
 from app.scoring.master_score import aggregate_scores
 from app.strategy.decision_engine import decide_final_trade
@@ -61,129 +60,11 @@ def run_bot_scan():
 
     # Open position lifecycle runs before any new-trade scan.
     if has_open_position():
-        open_pos = get_open_position()
         print("========== Open Position Monitor ==========")
-        print(open_pos)
-
-        option_symbol = open_pos.get("option_symbol")
-        quantity = int(open_pos.get("quantity", 1))
-        if not option_symbol:
-            print("Warning: open position has no option_symbol")
-            print("HOLD POSITION")
-            return
-
-        option_quote = get_option_market_price(option_symbol)
-        if option_quote is None:
-            print("Warning: option price unavailable from market snapshot")
-            print("HOLD POSITION")
-            return
-
-        if not option_quote.get("quote_valid", False):
-            print("HOLD POSITION: option quote invalid or spread too wide")
-            return
-
-        current_option_price = float(option_quote["price"])
-
-        stop_price = open_pos.get("stop_price")
-        target_0 = open_pos.get("target_0")
-        target_1 = open_pos.get("target_1")
-
-        exit_triggered = False
-        exit_reason = "HOLD"
-
-        if stop_price is not None and current_option_price <= float(stop_price):
-            exit_triggered = True
-            exit_reason = "stop_loss"
-        elif target_1 is not None and current_option_price >= float(target_1):
-            exit_triggered = True
-            exit_reason = "target_1"
-        elif target_0 is not None and current_option_price >= float(target_0):
-            exit_triggered = True
-            exit_reason = "target_0"
-        else:
-            # Placeholder hook for future early-exit logic.
-            early_exit_triggered = False
-            if early_exit_triggered:
-                exit_triggered = True
-                exit_reason = "early_exit_placeholder"
-
-        if exit_triggered:
-            if ENABLE_TRADING:
-                sell_order_result = submit_option_sell_order(option_symbol, qty=quantity)
-            elif SIMULATE_POSITIONS:
-                paper_sell_order = submit_paper_sell_order(
-                    symbol=option_symbol,
-                    qty=quantity,
-                    price=current_option_price,
-                )
-                sell_order_result = {
-                    "submitted": True,
-                    "order_id": paper_sell_order.get("order_id"),
-                    "status": paper_sell_order.get("status", "FILLED"),
-                    "broker": "PAPER_SIM",
-                    "symbol": option_symbol,
-                    "qty": quantity,
-                }
-            else:
-                sell_order_result = {
-                    "submitted": False,
-                    "reason": "ENABLE_TRADING=false and SIMULATE_POSITIONS=false",
-                    "symbol": option_symbol,
-                    "qty": quantity,
-                }
-
-            if sell_order_result.get("submitted"):
-                closed_position = close_position(exit_price=current_option_price)
-                if closed_position is not None:
-                    entry_price = float(open_pos.get("entry_price", 0.0))
-                    contracts = int(open_pos.get("quantity", 1))
-                    pnl = (current_option_price - entry_price) * contracts * 100
-                    was_loss = pnl < 0
-                    record_trade_result(pnl=pnl, was_loss=was_loss)
-                    log_trade_event(
-                        "EXIT",
-                        {
-                            "symbol": open_pos.get("symbol"),
-                            "option_symbol": option_symbol,
-                            "direction": open_pos.get("direction"),
-                            "quantity": quantity,
-                            "entry_price": entry_price,
-                            "exit_price": current_option_price,
-                            "pnl": round(pnl, 2),
-                            "was_loss": was_loss,
-                            "exit_reason": exit_reason,
-                            "order_id": sell_order_result.get("order_id"),
-                            "broker": sell_order_result.get("broker", "ALPACA"),
-                        },
-                    )
-            else:
-                closed_position = None
-                log_trade_event(
-                    "ORDER_SKIPPED",
-                    {
-                        "phase": "EXIT",
-                        "symbol": open_pos.get("symbol"),
-                        "option_symbol": option_symbol,
-                        "quantity": quantity,
-                        "reason": sell_order_result.get("reason", "Sell order not submitted"),
-                    },
-                )
-
-            print("========== Exit Decision ==========")
-            print(
-                {
-                    "exit_triggered": True,
-                    "exit_reason": exit_reason,
-                    "current_option_price": current_option_price,
-                }
-            )
-            print("========== Exit Order Result ==========")
-            print(sell_order_result)
-            print("========== Position Close Result ==========")
-            print(closed_position)
-            return
-
-        print("HOLD POSITION")
+        print(get_open_position())
+        monitor_result = monitor_open_position_once()
+        print("========== Monitor Result ==========")
+        print(monitor_result)
         return
 
     eastern = ZoneInfo("America/New_York")
@@ -412,28 +293,24 @@ def run_bot_scan():
         print(contract)
         if contract:
             entry_price = contract.get("mid") or contract.get("ask")
-            if ENABLE_TRADING:
-                order_result = submit_option_buy_order(contract["symbol"], qty=1)
+            trade_quantity = max(int(POSITION_QUANTITY), 1)
+            order_result = submit_option_buy_order(contract["symbol"], qty=trade_quantity)
+            if order_result.get("submitted"):
+                pass
             elif SIMULATE_POSITIONS:
                 paper_order = submit_paper_buy_order(
                     symbol=contract["symbol"],
-                    qty=1,
+                    qty=trade_quantity,
                     price=entry_price,
                 )
                 order_result = {
                     "submitted": True,
                     "order_id": paper_order.get("order_id"),
                     "status": paper_order.get("status", "FILLED"),
-                    "broker": "PAPER_SIM",
+                    "broker": "INTERNAL_SIM",
                     "symbol": contract["symbol"],
-                    "qty": 1,
-                }
-            else:
-                order_result = {
-                    "submitted": False,
-                    "reason": "ENABLE_TRADING=false and SIMULATE_POSITIONS=false",
-                    "symbol": contract["symbol"],
-                    "qty": 1,
+                    "qty": trade_quantity,
+                    "route_reason": "SIMULATE_POSITIONS=true fallback",
                 }
 
             print("\n========== Order Result ==========")
@@ -450,7 +327,7 @@ def run_bot_scan():
                             "phase": "ENTRY",
                             "symbol": "QQQ",
                             "option_symbol": contract.get("symbol"),
-                            "quantity": 1,
+                            "quantity": trade_quantity,
                             "reason": "missing_contract_entry_price",
                         },
                     )
@@ -462,24 +339,32 @@ def run_bot_scan():
                             "phase": "ENTRY",
                             "symbol": "QQQ",
                             "option_symbol": contract.get("symbol"),
-                            "quantity": 1,
+                            "quantity": trade_quantity,
                             "reason": "trade_plan_unavailable",
                         },
                     )
                 else:
+                    target_1x = trade_plan.get("target_1x", trade_plan.get("target_0"))
+                    target_2x = trade_plan.get("target_2x", trade_plan.get("target_1"))
+                    target_3x = trade_plan.get("target_3x", trade_plan.get("target_2"))
+                    target_4x = trade_plan.get("target_4x")
                     try:
                         saved_position = open_position(
                             symbol="QQQ",
                             option_symbol=contract["symbol"],
                             direction=master_decision["decision"],
-                            quantity=1,
+                            quantity=trade_quantity,
                             entry_price=entry_price,
                             stop_price=trade_plan["stop"],
                             target_0=trade_plan.get("target_0"),
                             target_1=trade_plan["target_1"],
                             target_2=trade_plan["target_2"],
+                            target_3=target_3x,
+                            target_4=target_4x,
+                            risk_per_contract=trade_plan.get("risk_per_contract", trade_plan.get("risk_per_share")),
                             order_id=order_result.get("order_id", "SIMULATED_NO_ORDER"),
                         )
+                        record_new_trade()
                         print("\n========== Position Saved ==========")
                         print(saved_position)
                         log_trade_event(
@@ -488,12 +373,17 @@ def run_bot_scan():
                                 "symbol": "QQQ",
                                 "option_symbol": contract.get("symbol"),
                                 "direction": master_decision.get("decision"),
-                                "quantity": 1,
+                                "quantity": trade_quantity,
                                 "entry_price": entry_price,
                                 "stop_price": trade_plan.get("stop"),
                                 "target_0": trade_plan.get("target_0"),
                                 "target_1": trade_plan.get("target_1"),
                                 "target_2": trade_plan.get("target_2"),
+                                "target_1x": target_1x,
+                                "target_2x": target_2x,
+                                "target_3x": target_3x,
+                                "target_4x": target_4x,
+                                "risk_per_contract": trade_plan.get("risk_per_contract", trade_plan.get("risk_per_share")),
                                 "order_id": order_result.get("order_id"),
                                 "broker": order_result.get("broker", "ALPACA"),
                             },
@@ -506,7 +396,7 @@ def run_bot_scan():
                                 "phase": "ENTRY",
                                 "symbol": "QQQ",
                                 "option_symbol": contract.get("symbol"),
-                                "quantity": 1,
+                                "quantity": trade_quantity,
                                 "reason": str(exc),
                             },
                         )
@@ -518,7 +408,7 @@ def run_bot_scan():
                         "phase": "ENTRY",
                         "symbol": "QQQ",
                         "option_symbol": contract.get("symbol"),
-                        "quantity": 1,
+                        "quantity": trade_quantity,
                         "reason": order_result.get("reason", "Order not submitted"),
                     },
                 )

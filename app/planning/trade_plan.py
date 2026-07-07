@@ -56,6 +56,7 @@ def build_trade_plan(decision, latest_close, vwap, atr=None, swing_low=None, swi
             target_0 = entry + (1.0 * risk_per_share)
             target_1 = entry + (2.0 * risk_per_share)
             target_2 = entry + (3.0 * risk_per_share)
+            target_3 = entry + (4.0 * risk_per_share)
 
             reward_1 = target_1 - entry
             reward_2 = target_2 - entry
@@ -74,7 +75,14 @@ def build_trade_plan(decision, latest_close, vwap, atr=None, swing_low=None, swi
                 "target_0": float(target_0),
                 "target_1": float(target_1),
                 "target_2": float(target_2),
+                "target_3": float(target_3),
+                "target_4": float(target_3),
+                "target_1x": float(target_0),
+                "target_2x": float(target_1),
+                "target_3x": float(target_2),
+                "target_4x": float(target_3),
                 "risk_per_share": float(risk_per_share),
+                "risk_per_contract": float(risk_per_share),
                 "reward_1": float(reward_1),
                 "reward_2": float(reward_2),
                 "rr_1": float(rr_1),
@@ -121,6 +129,7 @@ def build_trade_plan(decision, latest_close, vwap, atr=None, swing_low=None, swi
             target_0 = entry - (1.0 * risk_per_share)
             target_1 = entry - (2.0 * risk_per_share)
             target_2 = entry - (3.0 * risk_per_share)
+            target_3 = entry - (4.0 * risk_per_share)
 
             reward_1 = entry - target_1
             reward_2 = entry - target_2
@@ -139,7 +148,14 @@ def build_trade_plan(decision, latest_close, vwap, atr=None, swing_low=None, swi
                 "target_0": float(target_0),
                 "target_1": float(target_1),
                 "target_2": float(target_2),
+                "target_3": float(target_3),
+                "target_4": float(target_3),
+                "target_1x": float(target_0),
+                "target_2x": float(target_1),
+                "target_3x": float(target_2),
+                "target_4x": float(target_3),
                 "risk_per_share": float(risk_per_share),
+                "risk_per_contract": float(risk_per_share),
                 "reward_1": float(reward_1),
                 "reward_2": float(reward_2),
                 "rr_1": float(rr_1),
@@ -172,7 +188,14 @@ def build_trade_plan(decision, latest_close, vwap, atr=None, swing_low=None, swi
         "target_0": float(entry + risk_per_share) if decision == "CALL" else float(entry - risk_per_share) if decision == "PUT" else float(target_0),
         "target_1": float(target_1),
         "target_2": float(target_2),
+        "target_3": float(entry + (4.0 * risk_per_share)) if decision == "CALL" else float(entry - (4.0 * risk_per_share)) if decision == "PUT" else float(target_2),
+        "target_4": float(entry + (4.0 * risk_per_share)) if decision == "CALL" else float(entry - (4.0 * risk_per_share)) if decision == "PUT" else float(target_2),
+        "target_1x": float(entry + risk_per_share) if decision == "CALL" else float(entry - risk_per_share) if decision == "PUT" else float(target_0),
+        "target_2x": float(target_1),
+        "target_3x": float(target_2),
+        "target_4x": float(entry + (4.0 * risk_per_share)) if decision == "CALL" else float(entry - (4.0 * risk_per_share)) if decision == "PUT" else float(target_2),
         "risk_per_share": float(risk_per_share),
+        "risk_per_contract": float(risk_per_share),
         "reward_1": float(reward_1),
         "reward_2": float(reward_2),
         "rr_1": float(rr_1),

@@ -9,7 +9,11 @@ ALPACA_PAPER = os.getenv("ALPACA_PAPER")
 ALPACA_ENDPOINT = os.getenv("ALPACA_ENDPOINT")
 ENABLE_TRADING = os.getenv("ENABLE_TRADING", "false").lower() == "true"
 SIMULATE_POSITIONS = os.getenv("SIMULATE_POSITIONS", "true").lower() == "true"
+USE_ALPACA_PAPER_EXECUTION = os.getenv("USE_ALPACA_PAPER_EXECUTION", "false").lower() == "true"
 BOT_LOOP_SECONDS = int(os.getenv("BOT_LOOP_SECONDS", "60"))
 BOT_START_TIME = os.getenv("BOT_START_TIME", "09:45")
 BOT_END_TIME = os.getenv("BOT_END_TIME", "12:00")
 API_TOKEN = os.getenv("API_TOKEN", "change_this_secret")
+POSITION_QUANTITY = int(os.getenv("POSITION_QUANTITY", "4"))
+BACKTEST_USE_STAGED_EXITS = os.getenv("BACKTEST_USE_STAGED_EXITS", "false").lower() == "true"
+USE_TUNED_STAGED_EXITS = os.getenv("USE_TUNED_STAGED_EXITS", "false").lower() == "true"

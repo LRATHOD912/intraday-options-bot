@@ -5,7 +5,6 @@ from zoneinfo import ZoneInfo
 
 
 STATE_PATH = Path("logs/daily_risk_state.json")
-MAX_TRADES_PER_DAY = 2
 MAX_LOSSES_PER_DAY = 2
 MAX_DAILY_LOSS = -300.0
 
@@ -52,25 +51,31 @@ class DailyRiskManager:
 
     def can_take_new_trade(self) -> bool:
         self.reset_if_new_day()
-        trades_today = int(self.state.get("trades_today", 0))
         losses_today = int(self.state.get("losses_today", 0))
         realized_pnl = float(self.state.get("realized_pnl", 0.0))
 
-        if trades_today >= MAX_TRADES_PER_DAY:
-            return False
         if losses_today >= MAX_LOSSES_PER_DAY:
             return False
         if realized_pnl <= MAX_DAILY_LOSS:
             return False
         return True
 
-    def record_trade_result(self, pnl, was_loss) -> None:
+    def record_new_trade(self) -> None:
         self.reset_if_new_day()
         self.state["trades_today"] = int(self.state.get("trades_today", 0)) + 1
+        self._save()
+
+    def record_realized_pnl(self, pnl, was_loss) -> None:
+        self.reset_if_new_day()
         if was_loss:
             self.state["losses_today"] = int(self.state.get("losses_today", 0)) + 1
         self.state["realized_pnl"] = round(float(self.state.get("realized_pnl", 0.0)) + float(pnl), 2)
         self._save()
+
+    def record_trade_result(self, pnl, was_loss) -> None:
+        # Backward compatibility for existing callers that used a single method.
+        self.record_new_trade()
+        self.record_realized_pnl(pnl=pnl, was_loss=was_loss)
 
 
 _default_manager = DailyRiskManager()
@@ -82,6 +87,14 @@ def can_take_new_trade() -> bool:
 
 def record_trade_result(pnl, was_loss) -> None:
     _default_manager.record_trade_result(pnl=pnl, was_loss=was_loss)
+
+
+def record_new_trade() -> None:
+    _default_manager.record_new_trade()
+
+
+def record_realized_pnl(pnl, was_loss) -> None:
+    _default_manager.record_realized_pnl(pnl=pnl, was_loss=was_loss)
 
 
 def reset_if_new_day() -> None:
