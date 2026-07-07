@@ -1,4 +1,5 @@
 ﻿import json
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -6,7 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from app.analytics.performance_tracker import get_summary
 from app.analytics.strategy_performance import get_strategy_summary
-from app.config import ALPACA_PAPER, API_TOKEN, ENABLE_TRADING, EXIT_PROFILE, MIN_ENTRY_QUALITY_SCORE, POSITION_QUANTITY, USE_ALPACA_PAPER_EXECUTION, USE_DYNAMIC_POSITION_SIZE, USE_REGIME_FILTER, USE_TUNED_STAGED_EXITS, VIEW_TOKEN
+from app.config import ALPACA_PAPER, API_TOKEN, BOT_END_TIME, BOT_START_TIME, ENABLE_TRADING, EXIT_PROFILE, MIN_ENTRY_QUALITY_SCORE, POSITION_QUANTITY, USE_ALPACA_PAPER_EXECUTION, USE_DYNAMIC_POSITION_SIZE, USE_REGIME_FILTER, USE_TUNED_STAGED_EXITS, VIEW_TOKEN
 from app.execution.position_manager import get_open_position, get_open_positions, get_total_open_risk, has_open_position
 from app.logs.trade_journal import log_trade_event
 from app.main import run_bot_scan
@@ -436,14 +437,155 @@ def require_view_token(token: str = Query(default=None)):
 
 def _build_public_dashboard_payload():
     payload = _build_dashboard_payload()
+    status = payload.get("status", {})
+    risk = payload.get("risk", {})
+    decision = payload.get("last_scan_decision") or {}
+    performance = payload.get("performance") or {}
+    pause_status = payload.get("pause_status") or {}
+
+    now = datetime.now()
+    try:
+        start_h, start_m = [int(v) for v in BOT_START_TIME.split(":", 1)]
+        end_h, end_m = [int(v) for v in BOT_END_TIME.split(":", 1)]
+        start_minutes = (start_h * 60) + start_m
+        end_minutes = (end_h * 60) + end_m
+    except Exception:
+        start_minutes = 9 * 60 + 45
+        end_minutes = 12 * 60
+    now_minutes = now.hour * 60 + now.minute
+
+    if now_minutes < 9 * 60 + 30:
+        market_session = "Pre-market"
+    elif now_minutes < start_minutes:
+        market_session = "Waiting for strategy window"
+    elif now_minutes <= end_minutes:
+        market_session = "Strategy window active"
+    elif now_minutes <= 16 * 60:
+        market_session = "After hours"
+    else:
+        market_session = "After hours"
+
+    strategy_route = decision.get("strategy_route") if isinstance(decision, dict) else {}
+    if not isinstance(strategy_route, dict):
+        strategy_route = {}
+
+    strategy_state = payload.get("strategy_status") or {}
+    enabled_strategies = strategy_state.get("enabled_strategies") or strategy_state.get("enabled") or []
+    disabled_strategies = strategy_state.get("disabled_strategies") or strategy_state.get("disabled") or []
+
+    reason = decision.get("reason") or decision.get("skip_reason") or decision.get("rejection_reason") or status.get("last_error") or "No reason recorded yet"
+    last_decision = strategy_route.get("decision") or strategy_route.get("strategy_name") or decision.get("signal") or "No decision yet"
+    active_strategy = strategy_route.get("strategy_name") or payload.get("active_strategy") or "No strategy selected yet"
+
+    explanation_reasons = []
+    if not status.get("last_scan_at"):
+        explanation_reasons.append("Bot has not scanned yet")
+    if not status.get("running"):
+        explanation_reasons.append("Bot is currently stopped")
+    if market_session in ("Pre-market", "After hours"):
+        explanation_reasons.append("Market closed")
+    elif market_session == "Waiting for strategy window":
+        explanation_reasons.append("Outside strategy window")
+    if pause_status.get("paused"):
+        explanation_reasons.append("Risk blocked")
+    if not explanation_reasons:
+        explanation_reasons.append("No valid setup")
+
+    positions = payload.get("positions") or []
+    position_cards = []
+    for p in positions:
+        entry = p.get("entry_price") or 0
+        current = p.get("current_price") if p.get("current_price") is not None else entry
+        qty = p.get("quantity") or 0
+        remaining_qty = p.get("remaining_quantity") if p.get("remaining_quantity") is not None else qty
+        pnl_value = p.get("realized_pnl")
+        if pnl_value is None:
+            try:
+                pnl_value = (float(current) - float(entry)) * float(remaining_qty) * 100
+                if str(p.get("direction", "")).upper() == "PUT":
+                    pnl_value = (float(entry) - float(current)) * float(remaining_qty) * 100
+            except Exception:
+                pnl_value = 0
+        try:
+            pnl_pct = ((float(current) - float(entry)) / float(entry) * 100) if float(entry) else 0
+            if str(p.get("direction", "")).upper() == "PUT":
+                pnl_pct = ((float(entry) - float(current)) / float(entry) * 100) if float(entry) else 0
+        except Exception:
+            pnl_pct = 0
+        position_cards.append(
+            {
+                "option_symbol": p.get("option_symbol"),
+                "direction": p.get("direction"),
+                "quantity": qty,
+                "remaining_quantity": remaining_qty,
+                "entry": entry,
+                "current_price": current,
+                "pnl_dollar": round(float(pnl_value or 0), 2),
+                "pnl_percent": round(float(pnl_pct or 0), 2),
+                "stop": p.get("stop_price"),
+                "targets": [p.get("target_1x"), p.get("target_2x"), p.get("target_3x"), p.get("target_4x")],
+                "holding_time": p.get("holding_time") or "N/A",
+                "broker": p.get("broker") or "paper",
+            }
+        )
+
+    today = performance.get("today") or {}
+    overall = performance.get("overall") or {}
+    trades_today = today.get("trades", risk.get("trades_today", 0))
+    wins_today = today.get("wins", max(int(trades_today or 0) - int(risk.get("losses_today", 0) or 0), 0))
+    losses_today = today.get("losses", risk.get("losses_today", 0))
+    win_rate_today = today.get("win_rate")
+    if win_rate_today is None:
+        try:
+            win_rate_today = (float(wins_today) / float(trades_today)) if trades_today else 0.0
+        except Exception:
+            win_rate_today = 0.0
+
+    account_snapshot = _read_json_file(Path("logs/account_snapshot.json")) or {}
+    buying_power = account_snapshot.get("buying_power")
+
     return {
-            "status": payload.get("status", {}),
-            "performance": payload.get("performance", {}),
-            "account": {
-                    "account_status": payload.get("status", {}).get("running") and "running" or "stopped",
-                    "open_positions_count": payload.get("status", {}).get("open_positions_count", 0),
-            },
-            "positions": payload.get("positions", []),
+        "status": {
+            "running": bool(status.get("running")),
+            "bot_state": "BOT RUNNING" if status.get("running") else "BOT STOPPED",
+            "market_session": market_session,
+            "last_scan_at": status.get("last_scan_at"),
+            "last_scan_age_seconds": None,
+            "last_decision": last_decision,
+            "last_reason": reason,
+            "active_strategy": active_strategy,
+            "current_regime": decision.get("regime") or "Unknown",
+            "strategy_confidence": strategy_route.get("confidence"),
+            "entry_quality_score": decision.get("entry_quality_score"),
+            "open_positions_count": status.get("open_positions_count", 0),
+        },
+        "performance": {
+            "today_pnl": today.get("realized_pnl", risk.get("realized_pnl", 0.0)),
+            "realized_pnl": today.get("realized_pnl", risk.get("realized_pnl", 0.0)),
+            "trades_today": trades_today,
+            "wins": wins_today,
+            "losses": losses_today,
+            "win_rate": win_rate_today,
+            "open_positions": status.get("open_positions_count", 0),
+            "profit_factor": overall.get("profit_factor"),
+            "buying_power": buying_power,
+            "bot_running": bool(status.get("running")),
+        },
+        "risk": risk,
+        "orders": payload.get("orders_last_10") or payload.get("orders", [])[:10],
+        "journal": payload.get("journal_last_10") or payload.get("journal", [])[:10],
+        "last_scan_decision": decision,
+        "last_skipped_reason": decision.get("skip_reason") or decision.get("rejection_reason") or reason,
+        "strategy": {
+            "regime": decision.get("regime") or "Unknown",
+            "current_strategy": active_strategy,
+            "strategy_confidence": strategy_route.get("confidence"),
+            "entry_quality_score": decision.get("entry_quality_score"),
+            "enabled_strategies": enabled_strategies,
+            "disabled_strategies": disabled_strategies,
+        },
+        "positions": position_cards,
+        "position_explanations": explanation_reasons,
     }
 
 
@@ -456,23 +598,34 @@ def _build_public_dashboard_html(view_token: str) -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Intraday Options Bot | Public View</title>
     <style>
-        :root { color-scheme: dark; --bg: #07111f; --panel: rgba(15, 23, 42, 0.92); --ink: #e5eefc; --muted: #93a4be; --line: rgba(148, 163, 184, 0.18); }
+        :root { color-scheme: dark; --bg: #07111f; --panel: rgba(15, 23, 42, 0.92); --ink: #e5eefc; --muted: #93a4be; --line: rgba(148, 163, 184, 0.18); --good: #4ade80; --bad: #f87171; }
         * { box-sizing: border-box; }
         body { margin: 0; min-height: 100vh; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top left, rgba(37,99,235,.25), transparent 28%), linear-gradient(180deg, #050a12, var(--bg)); color: var(--ink); }
-        .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+        .wrap { max-width: 1120px; margin: 0 auto; padding: 16px; }
         .hero, .panel, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 18px 45px rgba(0,0,0,.28); }
         .hero { padding: 16px; margin-bottom: 12px; }
         .hero h1 { margin: 0; font-size: 1.25rem; }
         .hero p, .hint { margin: 6px 0 0; color: var(--muted); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
+        .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 12px; }
         .card { padding: 12px; }
         .label { display: block; color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em; }
         .value { display: block; margin-top: 6px; font-size: 1.1rem; font-weight: 800; }
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 0.75rem; color: var(--ink); background: rgba(255,255,255,.06); }
         .positions { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
         .position { padding: 12px; border-radius: 16px; background: rgba(255,255,255,.04); }
         .status { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.08); margin-top: 12px; }
         .dot { width: 10px; height: 10px; border-radius: 999px; background: #4ade80; }
         .dot.off { background: #f87171; }
+        .section-title { margin: 0 0 10px; font-size: 1rem; }
+        .list { margin: 0; padding-left: 18px; color: var(--muted); }
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+        th { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .08em; }
+        .good { color: var(--good); }
+        .bad { color: var(--bad); }
+        .error { color: var(--bad); margin-top: 8px; }
         @media (max-width: 720px) { .wrap { padding: 12px; } }
     </style>
 </head>
@@ -483,8 +636,33 @@ def _build_public_dashboard_html(view_token: str) -> str:
             <p>Read-only market view</p>
             <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Loading...</span></div>
             <div class="hint" id="refresh-text"></div>
+            <div class="hint" id="meta-text"></div>
+            <div class="error" id="error-text"></div>
         </div>
         <div class="grid" id="kpi-grid"></div>
+        <div class="grid-2">
+            <div class="panel card">
+                <h2 class="section-title">Decision Snapshot</h2>
+                <div id="decision-grid"></div>
+            </div>
+            <div class="panel card">
+                <h2 class="section-title">Strategy Status</h2>
+                <div id="strategy-grid"></div>
+            </div>
+        </div>
+        <div class="grid-2">
+            <div class="panel card">
+                <h2 class="section-title">No Position Explanation</h2>
+                <ul class="list" id="explanations-list"></ul>
+            </div>
+            <div class="panel card">
+                <h2 class="section-title">Recent Activity</h2>
+                <div><span class="badge">Last 10 Journal Events</span></div>
+                <div class="table-wrap"><table id="journal-table"></table></div>
+                <div style="margin-top:10px;"><span class="badge">Last 10 Orders</span></div>
+                <div class="table-wrap"><table id="orders-table"></table></div>
+            </div>
+        </div>
         <div class="panel">
             <h2>Open Positions</h2>
             <div class="positions" id="positions-grid"></div>
@@ -492,27 +670,124 @@ def _build_public_dashboard_html(view_token: str) -> str:
     </div>
     <script>
         const VIEW_TOKEN = __VIEW_TOKEN__;
+        let firstRefreshDone = false;
         function fmt(value) { return Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+        function fmtPct(value) { return `${fmt((value || 0) * 100)}%`; }
         function kpi(label, value) { return `<div class="card"><span class="label">${label}</span><span class="value">${value}</span></div>`; }
-        async function refreshDashboard() {
-            const response = await fetch(`/public-dashboard-data?token=${encodeURIComponent(VIEW_TOKEN)}`);
-            if (!response.ok) { throw new Error(`HTTP ${response.status}`); }
-            const data = await response.json();
-            const status = data.status || {};
-            const performance = data.performance || {};
-            const account = data.account || {};
-            document.getElementById('status-text').textContent = `${status.state || 'Unknown'} · ${status.current_strategy || 'No active strategy'}`;
-            document.getElementById('status-dot').classList.toggle('off', !status.running);
-            document.getElementById('refresh-text').textContent = `Updated ${new Date().toLocaleTimeString()}`;
-            document.getElementById('kpi-grid').innerHTML = [
-                kpi('Today PnL', fmt(performance.today_pnl)),
-                kpi('Win Rate', `${fmt((performance.total_win_rate || 0) * 100)}%`),
-                kpi('Account', fmt(account.open_positions_count ? account.open_positions_count : 0)),
-                kpi('Open Positions', String(status.open_positions_count || 0)),
-            ].join('');
-            document.getElementById('positions-grid').innerHTML = (data.positions || []).map(position => `<div class="position"><strong>${position.option_symbol || '—'}</strong><div class="hint">${position.direction || '—'} · ${fmt(position.current_price)}</div></div>`).join('') || '<div class="hint">No open positions.</div>';
+        function toTimeText(value) {
+            if (!value) return 'Never';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return String(value);
+            return date.toLocaleTimeString();
         }
-        refreshDashboard().catch(() => { document.getElementById('status-text').textContent = 'Unavailable'; document.getElementById('status-dot').classList.add('off'); });
+        function ageText(value) {
+            if (!value) return 'No scans yet';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return 'Unknown';
+            const seconds = Math.max(Math.floor((Date.now() - date.getTime()) / 1000), 0);
+            if (seconds < 60) return `${seconds}s ago`;
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            const hours = Math.floor(minutes / 60);
+            return `${hours}h ago`;
+        }
+        function tableFromRows(tableId, rows, columns) {
+            const table = document.getElementById(tableId);
+            if (!rows || rows.length === 0) {
+                table.innerHTML = `<thead><tr>${columns.map(c => `<th>${c.label}</th>`).join('')}</tr></thead><tbody><tr><td colspan="${columns.length}" class="hint">No data yet</td></tr></tbody>`;
+                return;
+            }
+            const head = `<thead><tr>${columns.map(c => `<th>${c.label}</th>`).join('')}</tr></thead>`;
+            const body = `<tbody>${rows.map(row => `<tr>${columns.map(c => `<td>${row[c.key] ?? '—'}</td>`).join('')}</tr>`).join('')}</tbody>`;
+            table.innerHTML = head + body;
+        }
+        async function refreshDashboard() {
+            try {
+                const response = await fetch(`/public-dashboard-data?token=${encodeURIComponent(VIEW_TOKEN)}`);
+                if (!response.ok) { throw new Error(`HTTP ${response.status}`); }
+                const data = await response.json();
+                const status = data.status || {};
+                const performance = data.performance || {};
+                const strategy = data.strategy || {};
+                const positions = data.positions || [];
+
+                document.getElementById('error-text').textContent = '';
+                document.getElementById('status-text').textContent = `${status.bot_state || 'BOT STOPPED'} · ${status.market_session || 'Unknown session'}`;
+                document.getElementById('status-dot').classList.toggle('off', !status.running);
+                document.getElementById('refresh-text').textContent = `Last updated at ${new Date().toLocaleTimeString()}`;
+                document.getElementById('meta-text').textContent = `Latest check ${toTimeText(status.last_scan_at)} (${ageText(status.last_scan_at)}) · Last decision: ${status.last_decision || 'No decision yet'} · Reason: ${status.last_reason || 'No reason recorded'} · Strategy: ${status.active_strategy || 'No strategy selected yet'}`;
+
+                const pnlClass = Number(performance.today_pnl || 0) >= 0 ? 'good' : 'bad';
+                document.getElementById('kpi-grid').innerHTML = [
+                    kpi('Today PnL', `<span class="${pnlClass}">${fmt(performance.today_pnl)}</span>`),
+                    kpi('Trades Today', String(performance.trades_today || 0)),
+                    kpi('Wins', String(performance.wins || 0)),
+                    kpi('Losses', String(performance.losses || 0)),
+                    kpi('Win Rate', fmtPct(performance.win_rate || 0)),
+                    kpi('Open Positions', String(performance.open_positions || 0)),
+                    kpi('Realized PnL', fmt(performance.realized_pnl || 0)),
+                    kpi('Buying Power', performance.buying_power == null ? 'N/A' : fmt(performance.buying_power)),
+                    kpi('Bot Running', performance.bot_running ? 'Yes' : 'No'),
+                    kpi('Last Check Age', ageText(status.last_scan_at)),
+                ].join('');
+
+                document.getElementById('decision-grid').innerHTML = [
+                    kpi('Current Regime', status.current_regime || strategy.regime || 'Unknown'),
+                    kpi('Active Strategy', status.active_strategy || strategy.current_strategy || 'No strategy selected yet'),
+                    kpi('Strategy Confidence', status.strategy_confidence == null ? 'N/A' : fmt(status.strategy_confidence)),
+                    kpi('Entry Quality', status.entry_quality_score == null ? 'N/A' : fmt(status.entry_quality_score)),
+                    kpi('Last Decision', status.last_decision || 'No decision yet'),
+                    kpi('Last Skipped Reason', data.last_skipped_reason || 'N/A'),
+                ].join('');
+
+                const enabled = Array.isArray(strategy.enabled_strategies) ? strategy.enabled_strategies.join(', ') : 'N/A';
+                const disabled = Array.isArray(strategy.disabled_strategies) ? strategy.disabled_strategies.join(', ') : 'N/A';
+                document.getElementById('strategy-grid').innerHTML = [
+                    kpi('Enabled Strategies', enabled || 'N/A'),
+                    kpi('Disabled Strategies', disabled || 'None'),
+                ].join('');
+
+                const reasons = (data.position_explanations || []).map(reason => `<li>${reason}</li>`).join('');
+                document.getElementById('explanations-list').innerHTML = positions.length ? '<li>Open positions are active.</li>' : (`<li>No open positions right now.</li>${reasons}`);
+
+                tableFromRows('journal-table', data.journal || [], [
+                    { key: 'timestamp', label: 'Time' },
+                    { key: 'event_type', label: 'Event' },
+                    { key: 'payload', label: 'Details' },
+                ]);
+                tableFromRows('orders-table', data.orders || [], [
+                    { key: 'timestamp', label: 'Time' },
+                    { key: 'symbol', label: 'Symbol' },
+                    { key: 'side', label: 'Side' },
+                    { key: 'qty', label: 'Qty' },
+                    { key: 'status', label: 'Status' },
+                    { key: 'broker', label: 'Broker' },
+                ]);
+
+                if (positions.length) {
+                    document.getElementById('positions-grid').innerHTML = positions.map(position => {
+                        const pnlClassName = Number(position.pnl_dollar || 0) >= 0 ? 'good' : 'bad';
+                        const targets = (position.targets || []).filter(Boolean).join(', ') || 'N/A';
+                        return `<div class="position">
+                            <div><strong>${position.option_symbol || '—'}</strong> <span class="badge">${position.direction || '—'}</span></div>
+                            <div class="hint">Qty ${position.quantity ?? '—'} · Remaining ${position.remaining_quantity ?? '—'} · Broker ${position.broker || 'paper'}</div>
+                            <div class="hint">Entry ${fmt(position.entry)} · Current ${fmt(position.current_price)}</div>
+                            <div class="hint">PnL <span class="${pnlClassName}">${fmt(position.pnl_dollar)}</span> (${fmt(position.pnl_percent)}%)</div>
+                            <div class="hint">Risk Floor ${position.stop ?? 'N/A'} · Targets ${targets}</div>
+                            <div class="hint">Holding ${position.holding_time || 'N/A'}</div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    document.getElementById('positions-grid').innerHTML = '<div class="hint">No open positions right now.</div>';
+                }
+                firstRefreshDone = true;
+            } catch (error) {
+                document.getElementById('error-text').textContent = firstRefreshDone ? 'Loading state: unable to refresh data right now.' : 'Loading state: waiting for first successful data fetch.';
+                document.getElementById('status-text').textContent = 'BOT STATUS UNKNOWN';
+                document.getElementById('status-dot').classList.add('off');
+            }
+        }
+        refreshDashboard();
         setInterval(refreshDashboard, 10000);
     </script>
 </body>

@@ -49,11 +49,24 @@ class TestDashboardApi(unittest.TestCase):
         self.assertNotIn("Stop", html)
         self.assertNotIn("Scan", html)
         self.assertNotIn("API_TOKEN", html)
-        self.assertNotIn("ALPACA", html)
+        self.assertNotIn("ALPACA_SECRET_KEY", html)
         self.assertNotIn("Start Bot", html)
+        self.assertNotIn("/start", html)
+        self.assertNotIn("/stop", html)
+        self.assertNotIn("/scan-once", html)
 
     @patch("app.server.api.VIEW_TOKEN", "test-view-token")
-    @patch("app.server.api._build_public_dashboard_payload", return_value={"status": {"running": True}, "positions": []})
+    @patch(
+        "app.server.api._build_public_dashboard_payload",
+        return_value={
+            "status": {"running": True},
+            "positions": [],
+            "risk": {},
+            "orders": [],
+            "journal": [],
+            "last_scan_decision": {},
+        },
+    )
     def test_public_dashboard_data_returns_sanitized_payload(self, _mock_payload):
         client = TestClient(app)
 
@@ -63,6 +76,10 @@ class TestDashboardApi(unittest.TestCase):
         body = response.json()
         self.assertIn("status", body)
         self.assertIn("positions", body)
+        self.assertIn("risk", body)
+        self.assertIn("orders", body)
+        self.assertIn("journal", body)
+        self.assertIn("last_scan_decision", body)
         self.assertNotIn("API_TOKEN", response.text)
         self.assertNotIn("X-API-Token", response.text)
 
