@@ -121,6 +121,20 @@ class TestStrategyRouter(unittest.TestCase):
         self.assertEqual(route["strategy_name"], "GAP_AND_GO")
         self.assertEqual(route["direction"], "CALL")
 
+    def test_reversal_regime_has_mapping(self):
+        with patch.object(strategy_router, "ENABLE_GAP_FILL_REVERSAL", True):
+            route = self._route(
+                base_regime={"data": {"regime": "REVERSAL"}},
+                gap_fill_direction="neutral",
+                vwap_distance_percent=-0.01,
+                momentum_direction="bullish",
+                latest_close=521.0,
+                opening_high=523.0,
+                opening_low=518.0,
+                candle_result={"direction": "bullish"},
+            )
+        self.assertNotEqual(route["strategy_name"], "NO_TRADE")
+
     def test_range_scalp_call(self):
         with patch.object(strategy_router, "ENABLE_RANGE_SCALP_0DTE", True):
             route = self._route(

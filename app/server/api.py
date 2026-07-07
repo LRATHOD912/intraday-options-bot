@@ -1,5 +1,5 @@
 ﻿import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -97,8 +97,11 @@ def _build_decision_history(limit: int = 100):
                 "entry_quality": trace.get("entry_quality") or row.get("entry_quality_score"),
                 "accepted": bool(trace.get("accepted", (row.get("gate_result") or {}).get("allowed"))),
                 "reason": trace.get("reason") or (row.get("gate_result") or {}).get("reason"),
+                "reason_exact": trace.get("reason_exact") or row.get("rejection_reason") or trace.get("reason") or (row.get("gate_result") or {}).get("reason"),
                 "reason_raw": trace.get("reason_raw") or (row.get("gate_result") or {}).get("reason"),
                 "contract": trace.get("selected_option_contract"),
+                "rejected_by_gate": trace.get("rejected_by_gate") or row.get("rejected_by_gate") or (row.get("gate_result") or {}).get("gate"),
+                "next_retry_at": row.get("next_retry_at"),
             }
         )
     return output
@@ -160,6 +163,30 @@ def _build_dashboard_payload():
         latest_trace = (latest_decision or {}).get("trace") if isinstance(latest_decision, dict) else {}
         if not isinstance(latest_trace, dict):
             latest_trace = {}
+        last_scan_at_raw = runner.get("last_scan_at")
+        next_retry_time = None
+        if isinstance(last_scan_at_raw, str):
+            try:
+                next_retry_time = (datetime.fromisoformat(last_scan_at_raw) + timedelta(seconds=60)).isoformat()
+            except ValueError:
+                next_retry_time = None
+
+        trade_found = bool((latest_decision or {}).get("trade_found", (latest_decision or {}).get("master_decision", {}).get("decision") in ["CALL", "PUT"]))
+        trade_rejected = bool((latest_decision or {}).get("trade_rejected", not bool((latest_decision or {}).get("gate_result", {}).get("allowed", True))))
+        exact_rejection_reason = (
+            (latest_decision or {}).get("rejection_reason")
+            or latest_trace.get("reason_exact")
+            or latest_trace.get("reason")
+            or (latest_decision or {}).get("gate_result", {}).get("reason")
+            or "No rejection"
+        )
+        rejected_by_gate = (
+            (latest_decision or {}).get("rejected_by_gate")
+            or latest_trace.get("rejected_by_gate")
+            or (latest_decision or {}).get("gate_result", {}).get("gate")
+            or "none"
+        )
+
         strategy_state = strategy_status()
         strategy_perf = get_strategy_summary(limit=20)
         disabled_details = []
@@ -203,6 +230,11 @@ def _build_dashboard_payload():
                         "current_confidence": latest_trace.get("confidence") or ((latest_decision or {}).get("strategy_route") or {}).get("confidence"),
                         "current_entry_quality": latest_trace.get("entry_quality") or (latest_decision or {}).get("entry_quality_score"),
                         "friendly_last_error": _friendly_error_text(runner.get("last_error")),
+                        "trade_found": trade_found,
+                        "trade_rejected": trade_rejected,
+                        "exact_rejection_reason": exact_rejection_reason,
+                        "rejected_by_gate": rejected_by_gate,
+                        "next_retry_time": (latest_decision or {}).get("next_retry_at") or next_retry_time,
                 },
                 "positions": positions,
                 "risk": risk_state,
@@ -472,6 +504,11 @@ def _build_ui_html(api_token: str) -> str:
                 statCard('confidence', route.confidence ?? 'ΓÇö'),
                 statCard('regime', decision.regime || 'ΓÇö'),
                 statCard('entry_quality', decision.entry_quality_score ?? 'ΓÇö'),
+                statCard('trade_found', status.trade_found ? 'YES' : 'NO'),
+                statCard('trade_rejected', status.trade_rejected ? 'YES' : 'NO'),
+                statCard('rejected_by_gate', status.rejected_by_gate || 'none'),
+                statCard('exact_rejection_reason', status.exact_rejection_reason || 'none'),
+                statCard('next_retry_time', status.next_retry_time || 'unknown'),
             ].join('');
 
             const positions = (data.positions || []).map(p => ({{
@@ -689,6 +726,11 @@ def _build_public_dashboard_payload():
             "strategy_confidence": strategy_route.get("confidence"),
             "entry_quality_score": decision.get("entry_quality_score"),
             "open_positions_count": status.get("open_positions_count", 0),
+            "trade_found": status.get("trade_found"),
+            "trade_rejected": status.get("trade_rejected"),
+            "exact_rejection_reason": status.get("exact_rejection_reason"),
+            "rejected_by_gate": status.get("rejected_by_gate"),
+            "next_retry_time": status.get("next_retry_time"),
         },
         "performance": {
             "today_pnl": today.get("realized_pnl", risk.get("realized_pnl", 0.0)),
@@ -872,6 +914,11 @@ def _build_public_dashboard_html(view_token: str) -> str:
                     kpi('Active Strategy', status.active_strategy || strategy.current_strategy || 'No strategy selected yet'),
                     kpi('Strategy Confidence', status.strategy_confidence == null ? 'N/A' : fmt(status.strategy_confidence)),
                     kpi('Entry Quality', status.entry_quality_score == null ? 'N/A' : fmt(status.entry_quality_score)),
+                    kpi('Trade Found', status.trade_found ? 'YES' : 'NO'),
+                    kpi('Trade Rejected', status.trade_rejected ? 'YES' : 'NO'),
+                    kpi('Rejected By Gate', status.rejected_by_gate || 'none'),
+                    kpi('Exact Rejection Reason', status.exact_rejection_reason || 'none'),
+                    kpi('Next Retry Time', status.next_retry_time || 'unknown'),
                     kpi('Last Decision', status.last_decision || 'No decision yet'),
                     kpi('Last Skipped Reason', data.last_skipped_reason || 'N/A'),
                 ].join('');
@@ -901,6 +948,8 @@ def _build_public_dashboard_html(view_token: str) -> str:
                     { key: 'entry_quality', label: 'Entry Quality' },
                     { key: 'contract', label: 'Contract' },
                     { key: 'accepted', label: 'Accepted' },
+                    { key: 'rejected_by_gate', label: 'Rejected By' },
+                    { key: 'reason_exact', label: 'Exact Reason' },
                     { key: 'reason', label: 'Reason' },
                 ]);
                 tableFromRows('orders-table', data.orders || [], [

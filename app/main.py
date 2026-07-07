@@ -115,6 +115,14 @@ def _friendly_reject_reason(reason):
         "buying_power_insufficient": "Buying power insufficient",
     }
     text = str(reason or "")
+    if text.startswith("entry_quality_below_threshold:"):
+        parts = text.split(":")
+        if len(parts) == 3:
+            return f"Rejected because Entry Quality {parts[1]} < threshold {parts[2]}"
+    if text.startswith("regime_unmapped_strategy:"):
+        parts = text.split(":", 2)
+        if len(parts) == 3:
+            return f"Rejected because Regime {parts[1]} has no mapped strategy ({parts[2]})"
     if text.startswith("auto_pause:"):
         return "Risk limit reached"
     return mapping.get(text, text.replace("_", " ").strip().capitalize() if text else "No valid setup")
@@ -133,6 +141,8 @@ def _build_trace_payload(
     entry_quality_score,
     allowed,
     reason,
+    reason_exact=None,
+    rejected_by_gate=None,
     selected_contract=None,
     spread_percent=None,
 ):
@@ -141,6 +151,7 @@ def _build_trace_payload(
     option_delta = None
     if isinstance(selected_contract, dict):
         option_delta = selected_contract.get("delta")
+    resolved_reason = reason_exact or _friendly_reject_reason(reason)
     return {
         "trace": {
             "symbol": symbol,
@@ -160,8 +171,10 @@ def _build_trace_payload(
             "selected_strategy": selected_strategy,
             "selected_option_contract": selected_contract.get("symbol") if isinstance(selected_contract, dict) else None,
             "accepted": bool(allowed),
-            "reason": _friendly_reject_reason(reason),
+            "reason": resolved_reason,
+            "reason_exact": resolved_reason,
             "reason_raw": reason,
+            "rejected_by_gate": rejected_by_gate,
         }
     }
 
@@ -404,16 +417,24 @@ def run_bot_scan():
         latest_bar_timestamp=latest["timestamp"],
         trade_plan=trade_plan,
     )
-    allowed = gate_result["allowed"]
-    allow_reason = gate_result["reason"]
+    gate_state = {
+        "allowed": bool(gate_result.get("allowed")),
+        "reason": str(gate_result.get("reason") or "Trade allowed by final gate"),
+        "gate": "final_trade_gate",
+    }
+
+    def _reject(gate_name, reason_code):
+        if gate_state["allowed"]:
+            gate_state["allowed"] = False
+            gate_state["reason"] = reason_code
+            gate_state["gate"] = gate_name
 
     regime_name = regime_result.get("data", {}).get("regime", "CHOPPY")
     if USE_REGIME_FILTER and master_decision.get("decision") in ["CALL", "PUT"]:
         trade_side = "bullish" if master_decision["decision"] == "CALL" else "bearish"
         breakout_ok = bool(regime_result.get("direction") == trade_side)
         if (news_result.get("data", {}) or {}).get("can_trade") is False:
-            allowed = False
-            allow_reason = "regime_news_risk"
+            _reject("regime_filter", "regime_news_risk")
         elif regime_name in ["CHOPPY", "LOW_VOLATILITY", "COMPRESSION", "RANGE"]:
             align_ok = (
                 opening_range_result.get("direction") == trade_side
@@ -421,16 +442,13 @@ def run_bot_scan():
                 and candle_result.get("direction") in [trade_side, "neutral"]
             )
             if not align_ok:
-                allowed = False
-                allow_reason = "regime_choppy_low_vol_block"
+                _reject("regime_filter", "regime_choppy_low_vol_block")
         else:
             expected_regimes = ["TREND_UP", "POWER_TREND", "BREAKOUT", "EXPANSION"] if trade_side == "bullish" else ["TREND_DOWN", "POWER_TREND", "BREAKOUT", "EXPANSION"]
             if regime_name not in expected_regimes + ["HIGH_VOLATILITY", "REVERSAL"] and not breakout_ok:
-                allowed = False
-                allow_reason = "regime_direction_block"
+                _reject("regime_filter", "regime_direction_block")
             if regime_name == "REVERSAL" and not breakout_ok:
-                allowed = False
-                allow_reason = "regime_direction_block"
+                _reject("regime_filter", "regime_direction_block")
 
     entry_quality = calculate_entry_quality_score(
         decision=master_decision.get("decision"),
@@ -449,8 +467,7 @@ def run_bot_scan():
     )
     entry_quality_score = int(entry_quality.get("entry_quality_score", 0))
     if master_decision.get("decision") in ["CALL", "PUT"] and entry_quality_score < int(MIN_ENTRY_QUALITY_SCORE):
-        allowed = False
-        allow_reason = "entry_quality_below_threshold"
+        _reject("entry_quality_gate", f"entry_quality_below_threshold:{entry_quality_score}:{int(MIN_ENTRY_QUALITY_SCORE)}")
         log_trade_event(
             "ENTRY_QUALITY_BLOCK",
             {
@@ -463,8 +480,7 @@ def run_bot_scan():
 
     auto_pause_ok, auto_pause_reason = can_open_new_trade()
     if not auto_pause_ok:
-        allowed = False
-        allow_reason = f"auto_pause:{auto_pause_reason}"
+        _reject("auto_pause_gate", f"auto_pause:{auto_pause_reason}")
         log_trade_event("AUTO_PAUSE_TRIGGERED", {"reason": auto_pause_reason})
 
     strategy_route = route_strategy(
@@ -510,9 +526,15 @@ def run_bot_scan():
         ),
     )
 
+    allowed = gate_state["allowed"]
+    allow_reason = gate_state["reason"]
+    rejected_by_gate = gate_state["gate"] if not allowed else "none"
+    trade_found = bool(master_decision.get("decision") in ["CALL", "PUT"])
+    trade_rejected = bool(trade_found and not allowed)
+
     decision_payload = {
         "master_decision": master_decision,
-        "gate_result": {"allowed": allowed, "reason": allow_reason},
+        "gate_result": {"allowed": allowed, "reason": allow_reason, "gate": rejected_by_gate},
         "risk_allowed": can_trade,
         "risk_reason": risk_reason,
         "entry_quality_score": entry_quality_score,
@@ -520,6 +542,11 @@ def run_bot_scan():
         "strategy_route": strategy_route,
         "pause_status": get_pause_status(),
         "market_price": float(latest["close"]),
+        "trade_found": trade_found,
+        "trade_rejected": trade_rejected,
+        "rejected_by_gate": rejected_by_gate,
+        "rejection_reason": _friendly_reject_reason(allow_reason),
+        "next_retry_at": (datetime.now(ZoneInfo("America/New_York")) + timedelta(seconds=60)).isoformat(),
     }
     decision_payload.update(
         _build_trace_payload(
@@ -534,15 +561,21 @@ def run_bot_scan():
             entry_quality_score=entry_quality_score,
             allowed=allowed,
             reason=allow_reason,
+            reason_exact=_friendly_reject_reason(allow_reason),
+            rejected_by_gate=rejected_by_gate,
         )
     )
     log_decision(decision_payload)
 
-    def _log_rejection(reason_code, selected_contract=None, spread_value=None):
+    def _log_rejection(reason_code, selected_contract=None, spread_value=None, gate_name="execution_gate"):
         log_decision(
             {
                 **decision_payload,
-                "gate_result": {"allowed": False, "reason": reason_code},
+                "gate_result": {"allowed": False, "reason": reason_code, "gate": gate_name},
+                "trade_rejected": True,
+                "rejected_by_gate": gate_name,
+                "rejection_reason": _friendly_reject_reason(reason_code),
+                "next_retry_at": (datetime.now(ZoneInfo("America/New_York")) + timedelta(seconds=60)).isoformat(),
                 **_build_trace_payload(
                     symbol="QQQ",
                     regime_name=regime_name,
@@ -555,6 +588,8 @@ def run_bot_scan():
                     entry_quality_score=entry_quality_score,
                     allowed=False,
                     reason=reason_code,
+                    reason_exact=_friendly_reject_reason(reason_code),
+                    rejected_by_gate=gate_name,
                     selected_contract=selected_contract,
                     spread_percent=spread_value,
                 ),
@@ -637,7 +672,7 @@ def run_bot_scan():
         total_open_positions = len(open_positions)
         if not can_take_new_trade():
             print("NO TRADE: daily risk limit reached")
-            _log_rejection("risk_limit_reached")
+            _log_rejection("risk_limit_reached", gate_name="daily_risk_gate")
             log_trade_event(
                 "RISK_BLOCK",
                 {
@@ -650,7 +685,7 @@ def run_bot_scan():
 
         if not ALLOW_MULTIPLE_POSITIONS and total_open_positions > 0:
             print("NO TRADE: multiple positions disabled")
-            _log_rejection("multiple_positions_disabled")
+            _log_rejection("multiple_positions_disabled", gate_name="position_limit_gate")
             log_trade_event(
                 "ORDER_SKIPPED",
                 {
@@ -666,7 +701,11 @@ def run_bot_scan():
         route_enabled = USE_STRATEGY_ROUTER and route_name != "NO_TRADE" and strategy_enabled(route_name)
         if USE_STRATEGY_ROUTER and not route_enabled:
             print(f"NO TRADE: strategy router blocked {route_name}")
-            _log_rejection("strategy_router_blocked")
+            router_reason = str(strategy_route.get("reason") or "no mapped strategy")
+            if regime_name == "REVERSAL" and route_name == "NO_TRADE":
+                _log_rejection(f"regime_unmapped_strategy:{regime_name}:{router_reason}", gate_name="strategy_router")
+            else:
+                _log_rejection("strategy_router_blocked", gate_name="strategy_router")
             log_trade_event(
                 "STRATEGY_ROUTED_NO_TRADE",
                 {
@@ -679,7 +718,7 @@ def run_bot_scan():
 
         if USE_STRATEGY_ROUTER and route_name == "RANGE_SCALP_0DTE" and ENABLE_TRADING and RANGE_SCALP_ONLY_PAPER:
             print("NO TRADE: range scalp 0DTE is paper-only by config")
-            _log_rejection("range_scalp_paper_only")
+            _log_rejection("range_scalp_paper_only", gate_name="strategy_router")
             log_trade_event(
                 "STRATEGY_ROUTED_NO_TRADE",
                 {
@@ -693,7 +732,7 @@ def run_bot_scan():
 
         if total_open_positions >= int(MAX_OPEN_POSITIONS):
             print("NO TRADE: max open positions reached")
-            _log_rejection("max_open_positions_reached")
+            _log_rejection("max_open_positions_reached", gate_name="position_limit_gate")
             log_trade_event(
                 "RISK_BLOCK",
                 {

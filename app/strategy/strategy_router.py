@@ -326,6 +326,30 @@ def route_strategy(
                 risk_multiplier=0.95,
                 max_hold_minutes=30,
             ).to_dict()
+
+    if regime_name == "REVERSAL":
+        if vwap_distance_percent is not None and float(vwap_distance_percent) <= 0 and momentum_direction in ["bullish", "neutral"]:
+            return _route(
+                "GAP_FILL_REVERSAL",
+                "CALL",
+                confidence=min(0.86, 0.45 + abs(float(vwap_distance_percent)) * 10.0 + float(score) / 280.0),
+                reason="Reversal regime mapped to bullish gap-fill continuation",
+                required_exit_profile="balanced",
+                recommended_expiry_type="same_day_or_next",
+                risk_multiplier=0.9,
+                max_hold_minutes=35,
+            ).to_dict()
+        if vwap_distance_percent is not None and float(vwap_distance_percent) >= 0 and momentum_direction in ["bearish", "neutral"]:
+            return _route(
+                "GAP_FILL_REVERSAL",
+                "PUT",
+                confidence=min(0.86, 0.45 + abs(float(vwap_distance_percent)) * 10.0 + float(score) / 280.0),
+                reason="Reversal regime mapped to bearish gap-fill continuation",
+                required_exit_profile="balanced",
+                recommended_expiry_type="same_day_or_next",
+                risk_multiplier=0.9,
+                max_hold_minutes=35,
+            ).to_dict()
         if gap_fill_direction == "bearish" and regime_name in ["RANGE", "CHOPPY", "TREND_DOWN"] and vwap_distance_percent is not None and float(vwap_distance_percent) <= 0:
             return _route(
                 "GAP_FILL_REVERSAL",
