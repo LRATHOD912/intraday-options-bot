@@ -596,7 +596,7 @@ def _build_public_dashboard_html(view_token: str) -> str:
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Lolla Market Deck | Intraday Options Bot</title>
+    <title>Intraday Options Bot | Public View</title>
     <style>
         :root { color-scheme: dark; --bg: #07111f; --panel: rgba(15, 23, 42, 0.92); --ink: #e5eefc; --muted: #93a4be; --line: rgba(148, 163, 184, 0.18); --good: #4ade80; --bad: #f87171; }
         * { box-sizing: border-box; }
@@ -605,7 +605,6 @@ def _build_public_dashboard_html(view_token: str) -> str:
         .hero, .panel, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 18px 45px rgba(0,0,0,.28); }
         .hero { padding: 16px; margin-bottom: 12px; }
         .hero h1 { margin: 0; font-size: 1.32rem; letter-spacing: -0.02em; }
-        .brand { display: inline-block; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.12em; color: #93c5fd; margin-bottom: 6px; }
         .hero p, .hint { margin: 6px 0 0; color: var(--muted); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
         .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 12px; }
@@ -627,15 +626,15 @@ def _build_public_dashboard_html(view_token: str) -> str:
         .good { color: var(--good); }
         .bad { color: var(--bad); }
         .error { color: var(--bad); margin-top: 8px; }
+        .footer-mark { margin-top: 14px; text-align: center; color: var(--muted); font-size: 0.86rem; }
         @media (max-width: 720px) { .wrap { padding: 12px; } }
     </style>
 </head>
 <body>
     <div class="wrap">
         <div class="hero">
-            <div class="brand">Lolla</div>
-            <h1>Lolla Intraday Options Bot</h1>
-            <p>Read-only market view for friends</p>
+            <h1>Intraday Options Bot</h1>
+            <p>Read-only market view</p>
             <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Loading...</span></div>
             <div class="hint" id="refresh-text"></div>
             <div class="hint" id="meta-text"></div>
@@ -669,6 +668,7 @@ def _build_public_dashboard_html(view_token: str) -> str:
             <h2>Open Positions</h2>
             <div class="positions" id="positions-grid"></div>
         </div>
+        <div class="footer-mark">Designed by Lolla</div>
     </div>
     <script>
         const VIEW_TOKEN = __VIEW_TOKEN__;
