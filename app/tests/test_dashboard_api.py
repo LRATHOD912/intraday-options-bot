@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app.server.api import app, dashboard, ui
+from app.server.api import app, dashboard, ui, _build_dashboard_payload
 
 
 class TestDashboardApi(unittest.TestCase):
@@ -41,6 +41,14 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(payload["rejected_by_gate"], "market_hours_gate")
         self.assertEqual(payload["gate_result"]["gate"], "market_hours_gate")
         self.assertEqual(payload["trace"]["rejected_by_gate"], "market_hours_gate")
+
+    def test_outside_window_reason_text_is_idle_message(self):
+        from app.main import _friendly_reject_reason
+
+        self.assertEqual(
+            _friendly_reject_reason("outside_strategy_window"),
+            "Bot idle: outside configured strategy window.",
+        )
 
     @patch("app.server.api.VIEW_TOKEN", "test-view-token")
     def test_public_view_rejects_invalid_token(self):
@@ -88,6 +96,8 @@ class TestDashboardApi(unittest.TestCase):
                 "regime_note": "Reduced threshold, reduced size, quick exits only",
                 "entry_quality_passed": False,
                 "entry_quality_gap": -14,
+                "paper_mode": "PAPER_AGGRESSIVE",
+                "paper_aggressive_relaxed_rules": ["entry_quality threshold relaxed", "confidence threshold relaxed"],
             },
             "positions": [],
             "risk": {},
@@ -106,6 +116,8 @@ class TestDashboardApi(unittest.TestCase):
                 "entry_quality_gap": -14,
                 "regime_risk_multiplier": 0.5,
                 "regime_note": "Reduced threshold, reduced size, quick exits only",
+                "paper_mode": "PAPER_AGGRESSIVE",
+                "relaxed_rules": ["entry_quality threshold relaxed", "confidence threshold relaxed"],
             }],
             "last_scan_decision": {},
         },
@@ -135,10 +147,56 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("Reduced threshold", body["status"]["regime_note"])
         self.assertFalse(body["status"]["entry_quality_passed"])
         self.assertEqual(body["status"]["entry_quality_gap"], -14)
+        self.assertEqual(body["status"]["paper_mode"], "PAPER_AGGRESSIVE")
+        self.assertIn("entry_quality threshold relaxed", body["status"]["paper_aggressive_relaxed_rules"])
+        self.assertIn("confidence threshold relaxed", body["status"]["paper_aggressive_relaxed_rules"])
         self.assertIn("adaptive_entry_threshold", body["decision_history"][0])
         self.assertIn("entry_quality_score", body["decision_history"][0])
         self.assertNotIn("API_TOKEN", response.text)
         self.assertNotIn("X-API-Token", response.text)
+
+    @patch("app.server.api.get_summary", return_value={"today": {}, "overall": {}})
+    @patch("app.server.api.get_strategy_summary", return_value={"strategies": {}})
+    @patch("app.server.api.strategy_status", return_value={})
+    @patch("app.server.api.get_total_open_risk", return_value=0.0)
+    @patch("app.server.api.get_open_positions", return_value=[])
+    @patch("app.server.api.get_runner_status", return_value={"running": True, "thread_alive": True, "last_scan_at": "2026-07-08T10:00:00-04:00", "last_error": None})
+    @patch("app.server.api._read_jsonl")
+    @patch("app.server.api._read_json_file", return_value={})
+    def test_dashboard_derives_adaptive_threshold_when_missing(self, _mock_json, mock_read_jsonl, *_mocks):
+        decision_row = {
+            "timestamp": "2026-07-08T10:00:00-04:00",
+            "regime": "REVERSAL",
+            "entry_quality_score": 59,
+            "gate_result": {"allowed": False, "reason": "entry_quality_below_threshold:59:75", "gate": "entry_quality_gate"},
+            "strategy_route": {"strategy_name": "GAP_FILL_REVERSAL", "confidence": 0.82},
+            "trade_found": True,
+            "trade_rejected": True,
+            "rejected_by_gate": "entry_quality_gate",
+            "trace": {
+                "market_regime": "REVERSAL",
+                "entry_quality": 59,
+                "selected_strategy": "GAP_FILL_REVERSAL",
+                "reason": "Rejected because Entry Quality 59 < threshold 75",
+                "rejected_by_gate": "entry_quality_gate",
+            },
+        }
+
+        def read_jsonl_side_effect(path, limit=100):
+            path_text = str(path)
+            if path_text.endswith("decisions.jsonl"):
+                return [decision_row]
+            return []
+
+        mock_read_jsonl.side_effect = read_jsonl_side_effect
+        payload = _build_dashboard_payload()
+
+        self.assertEqual(payload["status"]["adaptive_entry_threshold"], 60)
+        self.assertEqual(payload["status"]["static_entry_threshold"], 75)
+        self.assertEqual(payload["status"]["entry_quality_gap"], -1)
+        self.assertEqual(payload["status"]["regime_risk_multiplier"], 0.7)
+        self.assertIn("adaptive threshold 60 for REVERSAL", payload["status"]["exact_rejection_reason"])
+        self.assertEqual(payload["decision_history"][0]["adaptive_entry_threshold"], 60)
 
 
 if __name__ == "__main__":

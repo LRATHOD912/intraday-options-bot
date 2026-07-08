@@ -20,6 +20,7 @@ from app.broker.paper_broker import submit_buy_order as submit_paper_buy_order
 from app.broker.orders import submit_option_buy_order
 from app.config import (
     ALLOW_0DTE,
+    ALPACA_PAPER,
     ALLOW_MULTIPLE_POSITIONS,
     ALLOW_OPPOSITE_DIRECTION_POSITIONS,
     BASE_POSITION_QUANTITY,
@@ -33,6 +34,10 @@ from app.config import (
     MAX_POSITION_QUANTITY,
     MIN_ENTRY_QUALITY_SCORE,
     MIN_OPTION_PRICE,
+    PAPER_AGGRESSIVE_MAX_SPREAD_PERCENT,
+    PAPER_AGGRESSIVE_MIN_CONFIDENCE,
+    PAPER_AGGRESSIVE_MIN_ENTRY_QUALITY,
+    PAPER_AGGRESSIVE_MODE,
     MIN_CONTRACTS_PER_TRADE,
     MIN_OPTION_OPEN_INTEREST,
     MIN_OPTION_VOLUME,
@@ -44,6 +49,7 @@ from app.config import (
     EXIT_PROFILE,
     RANGE_SCALP_ONLY_PAPER,
     TRADE_BUDGET_PERCENT,
+    USE_ALPACA_PAPER_EXECUTION,
     USE_BUDGET_POSITION_SIZING,
     USE_STRATEGY_ROUTER,
     USE_DYNAMIC_POSITION_SIZE,
@@ -91,7 +97,7 @@ def _friendly_reject_reason(reason):
         "regime_news_risk": "Market regime news risk",
         "regime_choppy_low_vol_block": "Market regime sideways",
         "regime_direction_block": "Momentum not confirmed",
-        "outside_strategy_window": "Outside trading hours",
+        "outside_strategy_window": "Bot idle: outside configured strategy window.",
         "market_closed": "Market closed",
         "auto_pause": "Risk limit reached",
         "risk_limit_reached": "Risk limit reached",
@@ -115,6 +121,7 @@ def _friendly_reject_reason(reason):
         "option_volume_too_low": "Option volume weak",
         "option_open_interest_too_low": "Open interest weak",
         "buying_power_insufficient": "Buying power insufficient",
+        "paper_aggressive_override_allowed": "Paper aggressive override allowed trade in paper mode",
     }
     text = str(reason or "")
     if text.startswith("entry_quality_below_threshold:"):
@@ -134,6 +141,52 @@ def _friendly_reject_reason(reason):
     if text.startswith("auto_pause:"):
         return "Risk limit reached"
     return mapping.get(text, text.replace("_", " ").strip().capitalize() if text else "No valid setup")
+
+
+def _paper_aggressive_active() -> bool:
+    return bool(
+        PAPER_AGGRESSIVE_MODE
+        and (not ENABLE_TRADING)
+        and ALPACA_PAPER
+        and USE_ALPACA_PAPER_EXECUTION
+    )
+
+
+def _paper_aggressive_override(*, strategy_route, entry_quality_score, option_spread_percent=None):
+    if not _paper_aggressive_active():
+        return {
+            "active": False,
+            "allowed": False,
+            "reason": "paper_aggressive_disabled",
+            "relaxed_rules": [],
+            "mode": "NORMAL",
+            "confidence": 0.0,
+        }
+
+    route_confidence = 0.0
+    if isinstance(strategy_route, dict):
+        route_confidence = float(strategy_route.get("confidence") or 0.0)
+
+    relaxed_rules = []
+    confidence_ok = route_confidence >= float(PAPER_AGGRESSIVE_MIN_CONFIDENCE)
+    entry_quality_ok = float(entry_quality_score or 0) >= float(PAPER_AGGRESSIVE_MIN_ENTRY_QUALITY)
+    spread_ok = option_spread_percent is None or float(option_spread_percent) <= float(PAPER_AGGRESSIVE_MAX_SPREAD_PERCENT)
+
+    if confidence_ok:
+        relaxed_rules.append("confidence threshold relaxed")
+    if entry_quality_ok:
+        relaxed_rules.append("entry_quality threshold relaxed")
+    if spread_ok and option_spread_percent is not None and float(option_spread_percent) > float(MAX_ENTRY_SPREAD_PERCENT):
+        relaxed_rules.append("spread threshold relaxed")
+
+    return {
+        "active": True,
+        "allowed": bool(confidence_ok and entry_quality_ok and spread_ok),
+        "reason": "paper_aggressive_override_allowed" if (confidence_ok and entry_quality_ok and spread_ok) else "paper_aggressive_disabled",
+        "relaxed_rules": relaxed_rules,
+        "mode": "PAPER_AGGRESSIVE",
+        "confidence": route_confidence,
+    }
 
 
 def _build_trace_payload(
@@ -157,6 +210,8 @@ def _build_trace_payload(
     entry_quality_gap=None,
     regime_risk_multiplier=None,
     regime_note=None,
+    paper_mode=None,
+    relaxed_rules=None,
     selected_contract=None,
     spread_percent=None,
 ):
@@ -195,6 +250,8 @@ def _build_trace_payload(
             "entry_quality_gap": entry_quality_gap,
             "regime_risk_multiplier": regime_risk_multiplier,
             "regime_note": regime_note,
+            "paper_mode": paper_mode,
+            "relaxed_rules": relaxed_rules or [],
         }
     }
 
@@ -480,6 +537,7 @@ def run_bot_scan():
     static_threshold = int(MIN_ENTRY_QUALITY_SCORE)
     regime_risk_multiplier = float(get_regime_risk_multiplier(regime_name))
     regime_note = str(get_regime_notes(regime_name))
+    paper_mode = "PAPER_AGGRESSIVE" if _paper_aggressive_active() else "NORMAL"
     if USE_REGIME_FILTER and master_decision.get("decision") in ["CALL", "PUT"]:
         trade_side = "bullish" if master_decision["decision"] == "CALL" else "bearish"
         breakout_ok = bool(regime_result.get("direction") == trade_side)
@@ -593,6 +651,30 @@ def run_bot_scan():
         entry_quality_score=entry_quality_score,
     )
 
+    aggressive_override = _paper_aggressive_override(
+        strategy_route=strategy_route,
+        entry_quality_score=entry_quality_score,
+        option_spread_percent=None,
+    )
+
+    if master_decision.get("decision") in ["CALL", "PUT"] and not gate_state["allowed"] and gate_state["gate"] == "entry_quality_gate" and aggressive_override.get("allowed"):
+        original_reason = gate_state["reason"]
+        gate_state["allowed"] = True
+        gate_state["reason"] = "paper_aggressive_override_allowed"
+        gate_state["gate"] = "paper_aggressive_override"
+        entry_quality_passed = True
+        log_trade_event(
+            "PAPER_AGGRESSIVE_OVERRIDE",
+            {
+                "symbol": "QQQ",
+                "decision": master_decision.get("decision"),
+                "original_rejection_reason": _friendly_reject_reason(original_reason),
+                "new_allowed_reason": _friendly_reject_reason("paper_aggressive_override_allowed"),
+                "mode": paper_mode,
+                "relaxed_rules": aggressive_override.get("relaxed_rules", []),
+            },
+        )
+
     allowed = gate_state["allowed"]
     allow_reason = gate_state["reason"]
     rejected_by_gate = gate_state["gate"] if not allowed else "none"
@@ -611,6 +693,8 @@ def run_bot_scan():
         "entry_quality_gap": entry_quality_gap,
         "regime_risk_multiplier": regime_risk_multiplier,
         "regime_note": regime_note,
+        "paper_mode": paper_mode,
+        "paper_aggressive_relaxed_rules": aggressive_override.get("relaxed_rules", []),
         "regime": regime_name,
         "strategy_route": strategy_route,
         "pause_status": get_pause_status(),
@@ -642,6 +726,8 @@ def run_bot_scan():
             entry_quality_gap=entry_quality_gap,
             regime_risk_multiplier=regime_risk_multiplier,
             regime_note=regime_note,
+            paper_mode=paper_mode,
+            relaxed_rules=aggressive_override.get("relaxed_rules", []),
         )
     )
     log_decision(decision_payload)
@@ -675,6 +761,8 @@ def run_bot_scan():
                     entry_quality_gap=entry_quality_gap,
                     regime_risk_multiplier=regime_risk_multiplier,
                     regime_note=regime_note,
+                    paper_mode=paper_mode,
+                    relaxed_rules=aggressive_override.get("relaxed_rules", []),
                     selected_contract=selected_contract,
                     spread_percent=spread_value,
                 ),
@@ -875,6 +963,12 @@ def run_bot_scan():
             if option_quote is not None:
                 spread_percent = option_quote.get("spread_percent")
 
+            aggressive_override = _paper_aggressive_override(
+                strategy_route=strategy_route,
+                entry_quality_score=entry_quality_score,
+                option_spread_percent=spread_percent,
+            )
+
             if option_quote is None or not option_quote.get("quote_valid", False):
                 _log_rejection("invalid_option_quote", selected_contract=contract)
                 log_trade_event(
@@ -891,7 +985,8 @@ def run_bot_scan():
                 _log_rejection("missing_bid_ask", selected_contract=contract)
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "missing_bid_ask"})
                 return
-            if spread_percent is not None and float(spread_percent) > float(MAX_ENTRY_SPREAD_PERCENT):
+            spread_limit = float(PAPER_AGGRESSIVE_MAX_SPREAD_PERCENT) if aggressive_override.get("allowed") else float(MAX_ENTRY_SPREAD_PERCENT)
+            if spread_percent is not None and float(spread_percent) > spread_limit:
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "spread_too_wide", "spread_percent": spread_percent})
                 _log_rejection("spread_too_wide", selected_contract=contract, spread_value=spread_percent)
                 return

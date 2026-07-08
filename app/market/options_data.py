@@ -29,6 +29,22 @@ def get_option_contracts(underlying_symbol, direction):
     return response.option_contracts
 
 
+def get_option_contracts_after_today(underlying_symbol, direction):
+    client = get_trading_client()
+    today = date.today()
+    option_type = "call" if direction == "CALL" else "put"
+    request = GetOptionContractsRequest(
+        underlying_symbols=[underlying_symbol],
+        status=AssetStatus.ACTIVE,
+        expiration_date_gte=today + timedelta(days=1),
+        expiration_date_lte=today + timedelta(days=14),
+        type=option_type,
+        limit=200,
+    )
+    response = client.get_option_contracts(request)
+    return response.option_contracts
+
+
 def get_option_snapshot(symbol):
     client = get_option_data_client()
     request = OptionSnapshotRequest(symbol_or_symbols=symbol)

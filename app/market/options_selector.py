@@ -16,7 +16,7 @@ from app.config import (
     RANGE_SCALP_MAX_PREMIUM,
     RANGE_SCALP_MIN_PREMIUM,
 )
-from app.market.options_data import get_option_contracts, get_option_snapshot
+from app.market.options_data import get_option_contracts, get_option_contracts_after_today, get_option_snapshot
 from app.market.market_data import get_latest_price
 
 def calculate_spread_percent(bid, ask):
@@ -128,6 +128,17 @@ def choose_best_contract(underlying_symbol, direction, underlying_price, strictn
     max_premium = filters["max_premium"]
     require_0dte = filters["require_0dte"]
     allow_0dte = ALLOW_0DTE if allow_0dte_override is None else bool(allow_0dte_override)
+
+    if not require_0dte and not allow_0dte:
+        non_zero_dte_contracts = []
+        for contract in contracts:
+            expiration = getattr(contract, "expiration_date", None)
+            if expiration is None or str(expiration) != str(date.today()):
+                non_zero_dte_contracts.append(contract)
+        if not non_zero_dte_contracts:
+            fallback_contracts = get_option_contracts_after_today(underlying_symbol, direction)
+            if fallback_contracts:
+                contracts = fallback_contracts
 
     preferred_candidates = []
     fallback_candidates = []
