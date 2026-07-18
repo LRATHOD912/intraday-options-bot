@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
+from app.ai.claude_decision_engine import decision_to_dict, get_claude_status, get_claude_trade_decision
+from app.ai.market_snapshot import load_market_snapshot
 from app.analytics.performance_tracker import get_summary
 from app.analytics.strategy_performance import get_strategy_summary
 from app.config import ALPACA_PAPER, API_TOKEN, BOT_END_TIME, BOT_START_TIME, ENABLE_TRADING, EXIT_PROFILE, MIN_ENTRY_QUALITY_SCORE, POSITION_QUANTITY, USE_ALPACA_PAPER_EXECUTION, USE_DYNAMIC_POSITION_SIZE, USE_REGIME_FILTER, USE_TUNED_STAGED_EXITS, VIEW_TOKEN
@@ -182,6 +184,81 @@ def _build_decision_history(limit: int = 100):
     return output
 
 
+def _fallback_claude_test_snapshot() -> dict:
+    now = datetime.now().astimezone().isoformat()
+    return {
+        "symbol": "QQQ",
+        "paper_trading_confirmed": True,
+        "existing_signal": "NO_TRADE",
+        "latest_prices": {"QQQ": 500.0, "SPY": 600.0, "IWM": 200.0},
+        "latest_bar": {
+            "timestamp": now,
+            "open": 499.5,
+            "high": 500.5,
+            "low": 499.0,
+            "close": 500.0,
+            "volume": 10000.0,
+            "vwap": 499.8,
+            "ema_9": 499.9,
+            "ema_20": 499.7,
+            "avg_volume": 9500.0,
+        },
+        "reference_levels": {
+            "premarket_high": 501.0,
+            "premarket_low": 498.5,
+            "opening_high": 500.6,
+            "opening_low": 499.2,
+            "prev_high": 502.0,
+            "prev_low": 497.0,
+            "prev_close": 499.4,
+        },
+        "analysis_results": [{"engine": "mock", "direction": "neutral", "score": 0, "data": {}}],
+        "signal_master_decision": {"decision": "NO_TRADE", "total_score": 0},
+        "strategy_route": {"strategy_name": "NO_TRADE", "direction": "NO_TRADE", "confidence": 0.0},
+        "entry_quality": {"entry_quality_score": 0},
+        "entry_quality_score": 0,
+        "adaptive_entry_threshold": 75,
+        "static_entry_threshold": 75,
+        "regime": "CHOPPY",
+        "regime_note": "Mocked snapshot",
+        "call_signal": {},
+        "put_signal": {},
+        "simple_final_signal": {"decision": "NO_TRADE", "details": {}},
+        "trade_plan": None,
+        "captured_at": now,
+    }
+
+
+def _build_claude_panel(latest_decision: dict | None) -> dict:
+    status = get_claude_status()
+    latest_decision = latest_decision or {}
+    claude_decision = latest_decision.get("claude_decision") or status.get("last_decision") or {}
+    if not isinstance(claude_decision, dict):
+        claude_decision = {}
+    selected_option = (((latest_decision.get("trace") or {}).get("selected_option_contract")) or latest_decision.get("selected_contract") or None)
+    if isinstance(selected_option, dict):
+        selected_option = selected_option.get("symbol")
+    hard_gate = latest_decision.get("claude_execution_gate") or latest_decision.get("claude_call_gate") or latest_decision.get("gate_result") or {}
+    api_status = status.get("api_status")
+    error = status.get("last_error") or ((latest_decision.get("gate_result") or {}).get("reason") if api_status == "error" else None)
+    return {
+        "decision_source": latest_decision.get("decision_source") or "EXISTING_ENGINE",
+        "enabled": bool(status.get("enabled")),
+        "model": status.get("model"),
+        "api_status": api_status,
+        "last_decision": claude_decision.get("decision"),
+        "confidence": claude_decision.get("confidence"),
+        "strategy": claude_decision.get("strategy"),
+        "reason": claude_decision.get("reason"),
+        "position_percentage": claude_decision.get("position_size_percent"),
+        "hard_gate_result": hard_gate,
+        "selected_option": selected_option,
+        "error": error,
+        "latency_ms": status.get("last_latency_ms"),
+        "decision_timestamp": claude_decision.get("decided_at") or status.get("last_success_at"),
+    }
+
+
 def _read_latest_decision():
         return (_read_jsonl(Path("logs/decisions.jsonl"), limit=1) or [None])[0]
 
@@ -288,6 +365,7 @@ def _build_dashboard_payload():
                 }
             )
         decision_history = _build_decision_history(limit=100)
+        claude_panel = _build_claude_panel(latest_decision if isinstance(latest_decision, dict) else {})
 
         account_snapshot = _read_json_file(Path("logs/account_snapshot.json")) or {}
         call_exposure = 0.0
@@ -330,7 +408,22 @@ def _build_dashboard_payload():
                         "entry_quality_gap": entry_quality_gap,
                         "paper_mode": paper_mode,
                         "paper_aggressive_relaxed_rules": paper_aggressive_relaxed_rules,
+                        "decision_source": claude_panel["decision_source"],
+                        "claude_enabled": claude_panel["enabled"],
+                        "claude_model": claude_panel["model"],
+                        "claude_api_status": claude_panel["api_status"],
+                        "claude_last_decision": claude_panel["last_decision"],
+                        "claude_confidence": claude_panel["confidence"],
+                        "claude_strategy": claude_panel["strategy"],
+                        "claude_reason": claude_panel["reason"],
+                        "claude_position_percentage": claude_panel["position_percentage"],
+                        "claude_hard_gate_result": claude_panel["hard_gate_result"],
+                        "claude_selected_option": claude_panel["selected_option"],
+                        "claude_error": claude_panel["error"],
+                        "claude_latency_ms": claude_panel["latency_ms"],
+                        "claude_decision_timestamp": claude_panel["decision_timestamp"],
                 },
+                    "claude": claude_panel,
                 "positions": positions,
                 "risk": risk_state,
                 "orders": _read_jsonl(Path("logs/paper_orders.jsonl"), limit=20),
@@ -594,7 +687,22 @@ def _build_ui_html(api_token: str) -> str:
 
             const decision = data.last_scan_decision || {{}};
             const route = decision.strategy_route || {{}};
+            const claude = data.claude || {{}};
             document.getElementById('decision-card').innerHTML = [
+                statCard('decision_source', status.decision_source || claude.decision_source || 'EXISTING_ENGINE'),
+                statCard('claude_enabled', status.claude_enabled ?? claude.enabled ?? false),
+                statCard('claude_model', status.claude_model || claude.model || 'N/A'),
+                statCard('claude_api_status', status.claude_api_status || claude.api_status || 'N/A'),
+                statCard('claude_last_decision', status.claude_last_decision || claude.last_decision || 'N/A'),
+                statCard('claude_confidence', status.claude_confidence ?? claude.confidence ?? 'N/A'),
+                statCard('claude_strategy', status.claude_strategy || claude.strategy || 'N/A'),
+                statCard('claude_reason', status.claude_reason || claude.reason || 'N/A'),
+                statCard('claude_position_pct', status.claude_position_percentage ?? claude.position_percentage ?? 'N/A'),
+                statCard('claude_hard_gate', JSON.stringify(status.claude_hard_gate_result || claude.hard_gate_result || {{}})),
+                statCard('claude_selected_option', status.claude_selected_option || claude.selected_option || 'N/A'),
+                statCard('claude_error', status.claude_error || claude.error || 'none'),
+                statCard('claude_latency_ms', status.claude_latency_ms ?? claude.latency_ms ?? 'N/A'),
+                statCard('claude_decision_ts', status.claude_decision_timestamp || claude.decision_timestamp || 'N/A'),
                 statCard('strategy', status.current_strategy || route.strategy_name || 'N/A'),
                 statCard('confidence', status.current_confidence ?? route.confidence ?? 'N/A'),
                 statCard('regime', status.current_regime || decision.regime || 'N/A'),
@@ -1213,6 +1321,39 @@ def scan_once(_: bool = Depends(require_api_token)):
         return {"ok": True, "error": None}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@app.get("/claude-status")
+def claude_status(_: bool = Depends(require_api_token)):
+    status = get_claude_status()
+    return {
+        **status,
+        "last_decision": status.get("last_decision"),
+    }
+
+
+@app.post("/claude-test")
+def claude_test(_: bool = Depends(require_api_token)):
+    snapshot = load_market_snapshot()
+    snapshot_source = "stored" if snapshot else "mocked"
+    if not snapshot:
+        snapshot = _fallback_claude_test_snapshot()
+    decision = get_claude_trade_decision(snapshot)
+    return {
+        "snapshot_source": snapshot_source,
+        "order_placement": False,
+        "decision": decision_to_dict(decision),
+    }
+
+
+@app.get("/claude-last-decision")
+def claude_last_decision(_: bool = Depends(require_api_token)):
+    status = get_claude_status()
+    return {
+        "last_decision": status.get("last_decision"),
+        "last_success_at": status.get("last_success_at"),
+        "last_error": status.get("last_error"),
+    }
 
 
 @app.get("/performance")

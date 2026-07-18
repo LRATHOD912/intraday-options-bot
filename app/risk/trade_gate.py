@@ -26,7 +26,7 @@ def _coerce_to_new_york_timestamp(value):
     return None
 
 
-def final_trade_gate(master_decision, risk_allowed, risk_reason, news_result=None, latest_bar_timestamp=None, trade_plan=None):
+def final_trade_gate(master_decision, risk_allowed, risk_reason, news_result=None, latest_bar_timestamp=None, trade_plan=None, skip_soft_checks=False):
     if latest_bar_timestamp is not None:
         latest_bar_et = _coerce_to_new_york_timestamp(latest_bar_timestamp)
         if latest_bar_et is not None:
@@ -40,18 +40,19 @@ def final_trade_gate(master_decision, risk_allowed, risk_reason, news_result=Non
     if not risk_allowed:
         return {"allowed": False, "reason": f"Risk block: {risk_reason}"}
 
-    if master_decision.get("decision") == "NO TRADE":
-        return {"allowed": False, "reason": "Decision is NO TRADE"}
-
-    if master_decision.get("total_score", 0) < 80:
-        return {"allowed": False, "reason": f"Score below minimum threshold: {master_decision.get('total_score', 0)}"}
-
     if news_result is not None:
         news_data = news_result.get("data", {}) or {}
         if news_data.get("can_trade") is False:
             return {"allowed": False, "reason": "News block: high-impact event nearby"}
 
-    if master_decision.get("quality") == "NO TRADE":
-        return {"allowed": False, "reason": "Quality is NO TRADE"}
+    if not skip_soft_checks:
+        if master_decision.get("decision") == "NO TRADE":
+            return {"allowed": False, "reason": "Decision is NO TRADE"}
+
+        if master_decision.get("total_score", 0) < 80:
+            return {"allowed": False, "reason": f"Score below minimum threshold: {master_decision.get('total_score', 0)}"}
+
+        if master_decision.get("quality") == "NO TRADE":
+            return {"allowed": False, "reason": "Quality is NO TRADE"}
 
     return {"allowed": True, "reason": "Trade allowed by final gate"}

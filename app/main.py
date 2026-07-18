@@ -15,6 +15,14 @@ from app.analysis.trend_engine import analyze_trend
 from app.analysis.volatility_engine import analyze_volatility
 from app.analysis.volatility_engine import calculate_atr
 from app.analysis.volume_engine import analyze_volume
+from app.ai.claude_decision_engine import decision_to_dict, get_claude_status, get_claude_trade_decision, no_trade_decision
+from app.ai.claude_safety_gate import evaluate_claude_call_control, evaluate_claude_execution_gate, infer_contract_direction
+from app.ai.market_snapshot import (
+    build_claude_market_snapshot as ai_build_claude_market_snapshot,
+    build_trade_plan_for_decision as ai_build_trade_plan_for_decision,
+    normalize_decision_label as ai_normalize_decision_label,
+    persist_market_snapshot,
+)
 from app.analytics.performance_tracker import get_summary
 from app.broker.paper_broker import submit_buy_order as submit_paper_buy_order
 from app.broker.orders import submit_option_buy_order
@@ -23,6 +31,8 @@ from app.config import (
     ALPACA_PAPER,
     ALLOW_MULTIPLE_POSITIONS,
     ALLOW_OPPOSITE_DIRECTION_POSITIONS,
+    CLAUDE_DECISION_ENABLED,
+    CLAUDE_MIN_SECONDS_BETWEEN_CALLS,
     BASE_POSITION_QUANTITY,
     ENABLE_TRADING,
     ENABLE_HEDGE_MODE,
@@ -93,6 +103,8 @@ from app.utils.time_utils import is_market_hours
 
 def _friendly_reject_reason(reason):
     mapping = {
+        "claude_invalid_strategy": "Claude returned unsupported strategy",
+        "claude_direction_conflict": "Claude direction conflicts with existing signal engine",
         "entry_quality_below_threshold": "Confidence too low",
         "regime_news_risk": "Market regime news risk",
         "regime_choppy_low_vol_block": "Market regime sideways",
@@ -122,8 +134,18 @@ def _friendly_reject_reason(reason):
         "option_open_interest_too_low": "Open interest weak",
         "buying_power_insufficient": "Buying power insufficient",
         "paper_aggressive_override_allowed": "Paper aggressive override allowed trade in paper mode",
+        "paper_mode_unconfirmed": "Paper mode not confirmed",
+        "missing_market_data": "Required market data missing",
+        "stale_market_snapshot": "Market snapshot is stale",
+        "claude_rate_limited": "Claude request throttled",
+        "placeholder_option_symbol": "Placeholder option symbol blocked",
+        "direction_mismatch": "Direction mismatch blocked",
+        "stale_claude_decision": "Claude decision is stale",
+        "daily_risk_limit_reached": "Risk limit reached",
     }
     text = str(reason or "")
+    if text.startswith("claude_no_trade:"):
+        return text.split(":", 1)[1].strip() or "Claude returned NO_TRADE"
     if text.startswith("entry_quality_below_threshold:"):
         parts = text.split(":")
         if len(parts) == 4:
@@ -257,48 +279,59 @@ def _build_trace_payload(
 
 
 def _validate_pre_buy_gate(*, contract, option_quote, spread_percent, entry_price, trade_quantity):
-    if not isinstance(contract, dict) or not contract.get("symbol"):
-        return False, "missing_option_symbol"
-
-    expiry_days = contract.get("expiry_days")
-    if expiry_days is None:
-        return False, "invalid_expiry"
-    if int(expiry_days) == 0 and not ALLOW_0DTE:
-        return False, "zero_dte_not_allowed"
-
-    delta = contract.get("delta")
-    if delta is None:
-        return False, "delta_out_of_range"
-    delta = abs(float(delta))
-    if delta < float(PREFERRED_DELTA_MIN) or delta > float(PREFERRED_DELTA_MAX):
-        return False, "delta_out_of_range"
-
-    volume = contract.get("volume")
-    if volume is None or float(volume) < float(MIN_OPTION_VOLUME):
-        return False, "option_volume_too_low"
-
-    open_interest = contract.get("open_interest")
-    if open_interest is None or float(open_interest) < float(MIN_OPTION_OPEN_INTEREST):
-        return False, "option_open_interest_too_low"
-
-    if option_quote is None or not option_quote.get("quote_valid", False):
-        return False, "invalid_option_quote"
-    if option_quote.get("bid") is None or option_quote.get("ask") is None:
-        return False, "missing_bid_ask"
-    if spread_percent is not None and float(spread_percent) > float(MAX_ENTRY_SPREAD_PERCENT):
-        return False, "spread_too_wide"
-    if entry_price is None or float(entry_price) < float(MIN_OPTION_PRICE) or float(entry_price) > float(MAX_OPTION_PRICE):
-        return False, "option_price_out_of_bounds"
-
     estimated_cost = float(entry_price) * float(max(int(trade_quantity), 1)) * 100.0
     try:
         buying_power = float(get_available_budget())
     except Exception:
         buying_power = None
-    if buying_power is not None and buying_power < estimated_cost:
-        return False, "buying_power_insufficient"
-
-    return True, "pre_buy_gate_passed"
+    result = evaluate_claude_execution_gate(
+        paper_trading_confirmed=True,
+        market_open=True,
+        within_strategy_window=True,
+        market_snapshot={
+            "latest_prices": {"QQQ": 1.0},
+            "latest_bar": {
+                "timestamp": datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1.0,
+                "vwap": 1.0,
+                "ema_9": 1.0,
+                "ema_20": 1.0,
+                "avg_volume": 1.0,
+            },
+            "analysis_results": [{"engine": "test"}],
+        },
+        claude_decided_at=datetime.now(ZoneInfo("America/New_York")).isoformat(),
+        decision_direction=infer_contract_direction(contract),
+        trade_plan_direction=infer_contract_direction(contract),
+        selector_direction=infer_contract_direction(contract),
+        contract=contract,
+        option_quote=option_quote,
+        spread_percent=spread_percent,
+        spread_limit=float(MAX_ENTRY_SPREAD_PERCENT),
+        entry_price=entry_price,
+        trade_quantity=trade_quantity,
+        allow_0dte=ALLOW_0DTE,
+        preferred_delta_min=float(PREFERRED_DELTA_MIN),
+        preferred_delta_max=float(PREFERRED_DELTA_MAX),
+        min_option_volume=float(MIN_OPTION_VOLUME),
+        min_option_open_interest=float(MIN_OPTION_OPEN_INTEREST),
+        min_option_price=float(MIN_OPTION_PRICE),
+        max_option_price=float(MAX_OPTION_PRICE),
+        buying_power=buying_power,
+        daily_risk_ok=True,
+        total_open_risk=0.0,
+        new_trade_risk=0.0,
+        max_total_open_risk=float("inf"),
+        total_open_positions=0,
+        max_open_positions=999,
+        duplicate_position=False,
+        conflicting_position=False,
+    )
+    return result.allowed, "pre_buy_gate_passed" if result.allowed else result.reason
 
 
 def _get_open_positions_summary():
@@ -321,6 +354,93 @@ def _has_conflicting_direction_position(open_positions, symbol, direction):
         if str(position.get("direction")) != str(direction):
             return True
     return False
+
+
+def _normalize_decision_label(value):
+    return ai_normalize_decision_label(value)
+
+
+def _build_trade_plan_for_decision(decision, latest_close, latest_vwap, atr_value, swing_low, swing_high):
+    return ai_build_trade_plan_for_decision(decision, latest_close, latest_vwap, atr_value, swing_low, swing_high)
+
+
+def _build_claude_market_snapshot(
+    *,
+    prices,
+    latest,
+    premarket_high,
+    premarket_low,
+    opening_high,
+    opening_low,
+    prev_high,
+    prev_low,
+    prev_close,
+    analysis_results,
+    signal_master_decision,
+    strategy_route,
+    entry_quality,
+    entry_quality_score,
+    adaptive_threshold,
+    static_threshold,
+    regime_name,
+    regime_note,
+    call_decision,
+    put_decision,
+    final_decision,
+    trade_plan,
+):
+    return ai_build_claude_market_snapshot(
+        symbol="QQQ",
+        paper_trading_confirmed=bool(ALPACA_PAPER and USE_ALPACA_PAPER_EXECUTION),
+        prices=prices,
+        latest=latest,
+        premarket_high=premarket_high,
+        premarket_low=premarket_low,
+        opening_high=opening_high,
+        opening_low=opening_low,
+        prev_high=prev_high,
+        prev_low=prev_low,
+        prev_close=prev_close,
+        analysis_results=analysis_results,
+        signal_master_decision=signal_master_decision,
+        strategy_route=strategy_route,
+        entry_quality=entry_quality,
+        entry_quality_score=entry_quality_score,
+        adaptive_threshold=adaptive_threshold,
+        static_threshold=static_threshold,
+        regime_name=regime_name,
+        regime_note=regime_note,
+        call_decision=call_decision,
+        put_decision=put_decision,
+        final_decision=final_decision,
+        trade_plan=trade_plan,
+    )
+
+
+def _build_effective_strategy_route(base_route, claude_decision):
+    effective_route = dict(base_route or {})
+    if claude_decision.decision == "NO_TRADE":
+        effective_route["strategy_name"] = "NO_TRADE"
+        effective_route["direction"] = "NO_TRADE"
+        effective_route["confidence"] = float(claude_decision.confidence)
+        effective_route["reason"] = claude_decision.reason
+        effective_route["required_exit_profile"] = claude_decision.exit_profile
+        effective_route["recommended_expiry_type"] = effective_route.get("recommended_expiry_type", "none")
+        effective_route["risk_multiplier"] = 0.0
+        effective_route["max_hold_minutes"] = int(claude_decision.max_hold_minutes)
+        return effective_route
+
+    effective_route["strategy_name"] = claude_decision.strategy
+    effective_route["direction"] = claude_decision.decision
+    effective_route["confidence"] = float(claude_decision.confidence)
+    effective_route["reason"] = claude_decision.reason
+    effective_route["required_exit_profile"] = claude_decision.exit_profile
+    effective_route["recommended_expiry_type"] = effective_route.get("recommended_expiry_type", "same_day_or_next")
+    effective_route["risk_multiplier"] = float(effective_route.get("risk_multiplier", 1.0) or 1.0)
+    effective_route["max_hold_minutes"] = int(claude_decision.max_hold_minutes)
+    effective_route["require_tighter_spread"] = bool(claude_decision.require_tighter_spread)
+    effective_route["risk_notes"] = list(claude_decision.risk_notes)
+    return effective_route
 
 
 def run_bot_scan():
@@ -369,7 +489,8 @@ def run_bot_scan():
 
     eastern = ZoneInfo("America/New_York")
     now_et = datetime.now(eastern)
-    if not (time(9, 45) <= now_et.time() <= time(12, 0)):
+    within_strategy_window = bool(time(9, 45) <= now_et.time() <= time(12, 0))
+    if not within_strategy_window:
         print("NO TRADE: outside strategy window")
         log_decision(
             {
@@ -491,27 +612,25 @@ def run_bot_scan():
     master_decision = aggregate_scores(analysis_results)
     risk = RiskManager()
     can_trade, risk_reason = risk.can_trade()
-    trade_plan = None
-    if master_decision["decision"] in ["CALL", "PUT"]:
-        atr_series = calculate_atr(qqq_bars)
-        atr_value = None
-        if atr_series is not None and len(atr_series) > 0:
-            latest_atr = atr_series.iloc[-1]
-            if latest_atr == latest_atr:
-                atr_value = float(latest_atr)
+    daily_risk_ok = bool(can_take_new_trade())
+    atr_series = calculate_atr(qqq_bars)
+    atr_value = None
+    if atr_series is not None and len(atr_series) > 0:
+        latest_atr = atr_series.iloc[-1]
+        if latest_atr == latest_atr:
+            atr_value = float(latest_atr)
 
-        recent_window = qqq_bars.tail(20)
-        swing_low = float(recent_window["low"].min()) if not recent_window.empty else None
-        swing_high = float(recent_window["high"].max()) if not recent_window.empty else None
-
-        trade_plan = build_trade_plan(
-            master_decision["decision"],
-            latest["close"],
-            latest["vwap"],
-            atr=atr_value,
-            swing_low=swing_low,
-            swing_high=swing_high,
-        )
+    recent_window = qqq_bars.tail(20)
+    swing_low = float(recent_window["low"].min()) if not recent_window.empty else None
+    swing_high = float(recent_window["high"].max()) if not recent_window.empty else None
+    trade_plan = _build_trade_plan_for_decision(
+        master_decision.get("decision"),
+        latest["close"],
+        latest["vwap"],
+        atr_value,
+        swing_low,
+        swing_high,
+    )
     gate_result = final_trade_gate(
         master_decision,
         can_trade,
@@ -519,6 +638,7 @@ def run_bot_scan():
         news_result=news_result,
         latest_bar_timestamp=latest["timestamp"],
         trade_plan=trade_plan,
+        skip_soft_checks=CLAUDE_DECISION_ENABLED,
     )
     gate_state = {
         "allowed": bool(gate_result.get("allowed")),
@@ -538,6 +658,8 @@ def run_bot_scan():
     regime_risk_multiplier = float(get_regime_risk_multiplier(regime_name))
     regime_note = str(get_regime_notes(regime_name))
     paper_mode = "PAPER_AGGRESSIVE" if _paper_aggressive_active() else "NORMAL"
+    if not daily_risk_ok:
+        _reject("daily_risk_gate", "risk_limit_reached")
     if USE_REGIME_FILTER and master_decision.get("decision") in ["CALL", "PUT"]:
         trade_side = "bullish" if master_decision["decision"] == "CALL" else "bearish"
         breakout_ok = bool(regime_result.get("direction") == trade_side)
@@ -577,7 +699,8 @@ def run_bot_scan():
     entry_quality_passed = bool(entry_quality_score >= adaptive_threshold)
     entry_quality_gap = int(entry_quality_score - adaptive_threshold)
     if master_decision.get("decision") in ["CALL", "PUT"] and not entry_quality_passed:
-        _reject("entry_quality_gate", f"entry_quality_below_threshold:{entry_quality_score}:{adaptive_threshold}:{regime_name}")
+        if not CLAUDE_DECISION_ENABLED:
+            _reject("entry_quality_gate", f"entry_quality_below_threshold:{entry_quality_score}:{adaptive_threshold}:{regime_name}")
         log_trade_event(
             "ENTRY_QUALITY_BLOCK",
             {
@@ -587,6 +710,7 @@ def run_bot_scan():
                 "threshold": adaptive_threshold,
                 "static_threshold": static_threshold,
                 "regime": regime_name,
+                "soft_block_only": bool(CLAUDE_DECISION_ENABLED),
             },
         )
     elif master_decision.get("decision") in ["CALL", "PUT"]:
@@ -675,6 +799,96 @@ def run_bot_scan():
             },
         )
 
+    breakout_high = premarket_high or opening_high or prev_high
+    breakdown_low = premarket_low or opening_low or prev_low
+    signal = {
+        "above_vwap": latest["close"] > latest["vwap"],
+        "below_vwap": latest["close"] < latest["vwap"],
+        "ema_bullish": latest["ema_9"] > latest["ema_20"],
+        "ema_bearish": latest["ema_9"] < latest["ema_20"],
+        "breakout": latest["close"] > breakout_high if breakout_high else False,
+        "breakdown": latest["close"] < breakdown_low if breakdown_low else False,
+        "volume_strong": latest["volume"] > latest["avg_volume"],
+        "spy_confirms": prices["SPY"] > 0,
+        "qqq_confirms": prices["QQQ"] > 0,
+        "ndx_confirms": True,
+        "vix_ok": True,
+        "spread_tight": True,
+    }
+
+    call_score, call_checks = calculate_call_score(signal)
+    put_score, put_checks = calculate_put_score(signal)
+
+    call_decision = build_trade_decision("QQQ", "CALL", call_score, call_checks)
+    put_decision = build_trade_decision("QQQ", "PUT", put_score, put_checks)
+    final_decision = decide_final_trade(call_decision, put_decision)
+
+    signal_master_decision = dict(master_decision)
+    claude_market_snapshot = _build_claude_market_snapshot(
+        prices=prices,
+        latest=latest,
+        premarket_high=premarket_high,
+        premarket_low=premarket_low,
+        opening_high=opening_high,
+        opening_low=opening_low,
+        prev_high=prev_high,
+        prev_low=prev_low,
+        prev_close=prev_close,
+        analysis_results=analysis_results,
+        signal_master_decision=signal_master_decision,
+        strategy_route=strategy_route,
+        entry_quality=entry_quality,
+        entry_quality_score=entry_quality_score,
+        adaptive_threshold=adaptive_threshold,
+        static_threshold=static_threshold,
+        regime_name=regime_name,
+        regime_note=regime_note,
+        call_decision=call_decision,
+        put_decision=put_decision,
+        final_decision=final_decision,
+        trade_plan=trade_plan,
+    )
+    persist_market_snapshot(claude_market_snapshot)
+    claude_status = get_claude_status()
+    claude_call_gate = evaluate_claude_call_control(
+        enabled=bool(CLAUDE_DECISION_ENABLED),
+        paper_trading_confirmed=bool(ALPACA_PAPER and USE_ALPACA_PAPER_EXECUTION),
+        market_open=True,
+        within_strategy_window=within_strategy_window,
+        risk_allowed=bool(can_trade and daily_risk_ok),
+        market_snapshot=claude_market_snapshot,
+        last_called_at=claude_status.get("last_request_at"),
+        min_seconds_between_calls=int(CLAUDE_MIN_SECONDS_BETWEEN_CALLS),
+    )
+    claude_decision = no_trade_decision("Claude not consulted")
+    decision_source = "EXISTING_ENGINE"
+    if CLAUDE_DECISION_ENABLED and claude_call_gate.allowed:
+        claude_decision = get_claude_trade_decision(claude_market_snapshot)
+        decision_source = "CLAUDE"
+        strategy_route = _build_effective_strategy_route(strategy_route, claude_decision)
+        master_decision = {
+            **master_decision,
+            "decision": claude_decision.decision,
+            "confidence": float(claude_decision.confidence),
+            "strategy": claude_decision.strategy,
+            "reason": claude_decision.reason,
+            "position_size_percent": float(claude_decision.position_size_percent),
+            "exit_profile": claude_decision.exit_profile,
+            "max_hold_minutes": int(claude_decision.max_hold_minutes),
+        }
+        trade_plan = _build_trade_plan_for_decision(
+            master_decision.get("decision"),
+            latest["close"],
+            latest["vwap"],
+            atr_value,
+            swing_low,
+            swing_high,
+        )
+        if master_decision.get("decision") == "NO_TRADE":
+            _reject("claude_decision", f"claude_no_trade:{claude_decision.reason}")
+        elif trade_plan is not None and trade_plan.get("valid_rr") is False:
+            _reject("trade_plan_gate", "Poor risk/reward")
+
     allowed = gate_state["allowed"]
     allow_reason = gate_state["reason"]
     rejected_by_gate = gate_state["gate"] if not allowed else "none"
@@ -683,6 +897,10 @@ def run_bot_scan():
 
     decision_payload = {
         "master_decision": master_decision,
+        "signal_master_decision": signal_master_decision,
+        "claude_decision": decision_to_dict(claude_decision),
+        "claude_call_gate": claude_call_gate.to_dict(),
+        "decision_source": decision_source,
         "gate_result": {"allowed": allowed, "reason": allow_reason, "gate": rejected_by_gate},
         "risk_allowed": can_trade,
         "risk_reason": risk_reason,
@@ -736,6 +954,10 @@ def run_bot_scan():
         log_decision(
             {
                 **decision_payload,
+                "claude_execution_gate": {
+                    "allowed": False,
+                    "reason": reason_code,
+                },
                 "gate_result": {"allowed": False, "reason": reason_code, "gate": gate_name},
                 "trade_rejected": True,
                 "rejected_by_gate": gate_name,
@@ -768,31 +990,6 @@ def run_bot_scan():
                 ),
             }
         )
-
-    breakout_high = premarket_high or opening_high or prev_high
-    breakdown_low = premarket_low or opening_low or prev_low
-    signal = {
-        "above_vwap": latest["close"] > latest["vwap"],
-        "below_vwap": latest["close"] < latest["vwap"],
-        "ema_bullish": latest["ema_9"] > latest["ema_20"],
-        "ema_bearish": latest["ema_9"] < latest["ema_20"],
-        "breakout": latest["close"] > breakout_high if breakout_high else False,
-        "breakdown": latest["close"] < breakdown_low if breakdown_low else False,
-        "volume_strong": latest["volume"] > latest["avg_volume"],
-        "spy_confirms": prices["SPY"] > 0,
-        "qqq_confirms": prices["QQQ"] > 0,
-        "ndx_confirms": True,
-        "vix_ok": True,
-        "spread_tight": True,
-    }
-
-    call_score, call_checks = calculate_call_score(signal)
-    put_score, put_checks = calculate_put_score(signal)
-
-    call_decision = build_trade_decision("QQQ", "CALL", call_score, call_checks)
-    put_decision = build_trade_decision("QQQ", "PUT", put_score, put_checks)
-
-    final_decision = decide_final_trade(call_decision, put_decision)
 
     print("\n========== Signal Check ==========")
     print(f"Latest QQQ Close : {latest['close']}")
@@ -827,6 +1024,7 @@ def run_bot_scan():
 
     print("\n========== Master Score ==========")
     print(master_decision)
+    print(f"Decision Source : {decision_source}")
     print("\n========== Master Trade Permission ==========")
     print(f"Allowed: {allowed}")
     print(f"Reason : {allow_reason}")
@@ -834,6 +1032,10 @@ def run_bot_scan():
     print("Saved to logs/decisions.jsonl")
     print("\n========== Strategy Router ==========")
     print(strategy_route)
+
+    if CLAUDE_DECISION_ENABLED:
+        print("\n========== Claude Decision ==========")
+        print(decision_to_dict(claude_decision))
 
     if trade_plan is not None:
         print("\n========== Trade Plan ==========")
@@ -843,7 +1045,7 @@ def run_bot_scan():
     if allowed and master_decision["decision"] in ["CALL", "PUT"]:
         open_positions = _get_open_positions_summary()
         total_open_positions = len(open_positions)
-        if not can_take_new_trade():
+        if not daily_risk_ok:
             print("NO TRADE: daily risk limit reached")
             _log_rejection("risk_limit_reached", gate_name="daily_risk_gate")
             log_trade_event(
@@ -871,7 +1073,8 @@ def run_bot_scan():
 
         route_name = strategy_route.get("strategy_name", "NO_TRADE")
         route_direction = strategy_route.get("direction", "NO_TRADE")
-        route_enabled = USE_STRATEGY_ROUTER and route_name != "NO_TRADE" and strategy_enabled(route_name)
+        selected_direction = master_decision["decision"]
+        route_enabled = route_name != "NO_TRADE" and strategy_enabled(route_name)
         if USE_STRATEGY_ROUTER and not route_enabled:
             print(f"NO TRADE: strategy router blocked {route_name}")
             router_reason = str(strategy_route.get("reason") or "no mapped strategy")
@@ -920,7 +1123,7 @@ def run_bot_scan():
 
         contract, reason = choose_best_contract(
             "QQQ",
-            route_direction if USE_STRATEGY_ROUTER and route_direction in ["CALL", "PUT"] else master_decision["decision"],
+            selected_direction,
             prices["QQQ"],
             strictness=OPTION_FILTER_STRICTNESS,
             strategy_name=route_name if USE_STRATEGY_ROUTER else None,
@@ -986,6 +1189,8 @@ def run_bot_scan():
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "missing_bid_ask"})
                 return
             spread_limit = float(PAPER_AGGRESSIVE_MAX_SPREAD_PERCENT) if aggressive_override.get("allowed") else float(MAX_ENTRY_SPREAD_PERCENT)
+            if CLAUDE_DECISION_ENABLED and claude_decision.require_tighter_spread:
+                spread_limit = min(spread_limit, 0.03)
             if spread_percent is not None and float(spread_percent) > spread_limit:
                 log_trade_event("ORDER_SKIPPED", {"phase": "ENTRY", "symbol": "QQQ", "option_symbol": contract.get("symbol"), "reason": "spread_too_wide", "spread_percent": spread_percent})
                 _log_rejection("spread_too_wide", selected_contract=contract, spread_value=spread_percent)
@@ -1008,6 +1213,7 @@ def run_bot_scan():
                 "reason": "budget_sizing_disabled",
             }
             trade_quantity = max(int(POSITION_QUANTITY), 1)
+            claude_size_percent = float(master_decision.get("position_size_percent") or 0.0)
             if USE_DYNAMIC_POSITION_SIZE:
                 base_quantity = int(BASE_POSITION_QUANTITY)
                 trade_quantity = base_quantity
@@ -1033,6 +1239,9 @@ def run_bot_scan():
 
                 regime_adjusted = max(1, int(round(float(trade_quantity) * regime_risk_multiplier)))
                 trade_quantity = min(max(1, regime_adjusted), int(MAX_POSITION_QUANTITY), int(MAX_CONTRACTS_PER_TRADE))
+                if CLAUDE_DECISION_ENABLED and claude_size_percent > 0:
+                    size_ratio = claude_size_percent / max(float(TRADE_BUDGET_PERCENT), 0.01)
+                    trade_quantity = min(max(1, int(round(float(trade_quantity) * size_ratio))), int(MAX_POSITION_QUANTITY), int(MAX_CONTRACTS_PER_TRADE))
                 log_trade_event(
                     "REGIME_RISK_ADJUSTMENT",
                     {
@@ -1048,7 +1257,8 @@ def run_bot_scan():
                 )
 
             if USE_BUDGET_POSITION_SIZING:
-                budget_decision = build_position_sizing_decision(entry_price, buying_power=None, budget_percent=TRADE_BUDGET_PERCENT)
+                budget_percent = claude_size_percent if CLAUDE_DECISION_ENABLED and claude_size_percent > 0 else TRADE_BUDGET_PERCENT
+                budget_decision = build_position_sizing_decision(entry_price, buying_power=None, budget_percent=budget_percent)
                 base_budget_qty = int(budget_decision.get("quantity", 0))
                 regime_adjusted_budget_qty = max(1, int(round(float(base_budget_qty) * regime_risk_multiplier))) if base_budget_qty > 0 else 0
                 trade_quantity = min(max(regime_adjusted_budget_qty, 0), int(MAX_POSITION_QUANTITY), int(MAX_CONTRACTS_PER_TRADE))
@@ -1065,7 +1275,7 @@ def run_bot_scan():
                         "base_quantity": base_budget_qty,
                         "regime_multiplier": regime_risk_multiplier,
                         "regime_note": regime_note,
-                        "budget_percent": TRADE_BUDGET_PERCENT,
+                        "budget_percent": budget_percent,
                         "reason": budget_decision.get("reason"),
                     },
                 )
@@ -1085,42 +1295,68 @@ def run_bot_scan():
                 _log_rejection("budget_too_small", selected_contract=contract, spread_value=spread_percent)
                 return
 
-            gate_ok, gate_reason = _validate_pre_buy_gate(
+            new_trade_risk = float(trade_plan.get("risk_per_contract", trade_plan.get("risk_per_share", 0.0)) or 0.0) * float(trade_quantity) * 100.0
+            total_open_risk = float(get_total_open_risk())
+            try:
+                buying_power = float(get_available_budget())
+            except Exception:
+                buying_power = None
+            execution_gate = evaluate_claude_execution_gate(
+                paper_trading_confirmed=bool(ALPACA_PAPER and USE_ALPACA_PAPER_EXECUTION),
+                market_open=True,
+                within_strategy_window=within_strategy_window,
+                market_snapshot=claude_market_snapshot,
+                claude_decided_at=claude_decision.decided_at if decision_source == "CLAUDE" else datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                decision_direction=master_decision.get("decision"),
+                trade_plan_direction=trade_plan.get("decision") if isinstance(trade_plan, dict) else None,
+                selector_direction=selected_direction,
                 contract=contract,
                 option_quote=option_quote,
                 spread_percent=spread_percent,
+                spread_limit=spread_limit,
                 entry_price=entry_price,
                 trade_quantity=trade_quantity,
+                allow_0dte=ALLOW_0DTE,
+                preferred_delta_min=float(PREFERRED_DELTA_MIN),
+                preferred_delta_max=float(PREFERRED_DELTA_MAX),
+                min_option_volume=float(MIN_OPTION_VOLUME),
+                min_option_open_interest=float(MIN_OPTION_OPEN_INTEREST),
+                min_option_price=float(MIN_OPTION_PRICE),
+                max_option_price=float(MAX_OPTION_PRICE),
+                buying_power=buying_power,
+                daily_risk_ok=daily_risk_ok,
+                total_open_risk=total_open_risk,
+                new_trade_risk=new_trade_risk,
+                max_total_open_risk=float(MAX_TOTAL_OPEN_RISK),
+                total_open_positions=total_open_positions,
+                max_open_positions=int(MAX_OPEN_POSITIONS),
+                duplicate_position=_has_duplicate_position(open_positions, contract.get("symbol"), master_decision["decision"]),
+                conflicting_position=(not (ALLOW_OPPOSITE_DIRECTION_POSITIONS or ENABLE_HEDGE_MODE)) and _has_conflicting_direction_position(open_positions, "QQQ", master_decision["decision"]),
             )
-            if not gate_ok:
-                log_trade_event(
-                    "ORDER_SKIPPED",
-                    {
-                        "phase": "ENTRY",
-                        "symbol": "QQQ",
-                        "option_symbol": contract.get("symbol"),
-                        "reason": gate_reason,
-                    },
-                )
-                _log_rejection(gate_reason, selected_contract=contract, spread_value=spread_percent)
-                return
-
-            new_trade_risk = float(trade_plan.get("risk_per_contract", trade_plan.get("risk_per_share", 0.0)) or 0.0) * float(trade_quantity) * 100.0
-            total_open_risk = float(get_total_open_risk())
-            if total_open_risk + new_trade_risk > float(MAX_TOTAL_OPEN_RISK):
-                log_trade_event(
-                    "RISK_BLOCK",
-                    {
-                        "symbol": "QQQ",
-                        "decision": master_decision.get("decision"),
-                        "reason": "total_open_risk_exceeded",
-                        "total_open_risk": round(total_open_risk, 2),
-                        "new_trade_risk": round(new_trade_risk, 2),
-                        "max_total_open_risk": float(MAX_TOTAL_OPEN_RISK),
-                    },
-                )
-                print("NO TRADE: total open risk exceeded")
-                _log_rejection("total_open_risk_exceeded", selected_contract=contract, spread_value=spread_percent)
+            if not execution_gate.allowed:
+                if execution_gate.reason == "direction_mismatch":
+                    log_trade_event(
+                        "DIRECTION_MISMATCH_BLOCK",
+                        {
+                            "symbol": "QQQ",
+                            "decision": master_decision.get("decision"),
+                            "selected_contract": contract.get("symbol"),
+                            "contract_direction": infer_contract_direction(contract),
+                        },
+                    )
+                else:
+                    log_trade_event(
+                        "ORDER_SKIPPED",
+                        {
+                            "phase": "ENTRY",
+                            "symbol": "QQQ",
+                            "option_symbol": contract.get("symbol"),
+                            "reason": execution_gate.reason,
+                        },
+                    )
+                if execution_gate.reason == "total_open_risk_exceeded":
+                    print("NO TRADE: total open risk exceeded")
+                _log_rejection(execution_gate.reason, selected_contract=contract, spread_value=spread_percent)
                 return
 
             order_result = submit_option_buy_order(contract["symbol"], qty=trade_quantity, limit_price=entry_price, timeout_seconds=5)
@@ -1209,6 +1445,38 @@ def run_bot_scan():
                             order_id=order_result.get("order_id", "SIMULATED_NO_ORDER"),
                         )
                         record_new_trade()
+                        log_decision(
+                            {
+                                **decision_payload,
+                                "claude_execution_gate": execution_gate.to_dict(),
+                                "selected_contract": contract,
+                                **_build_trace_payload(
+                                    symbol="QQQ",
+                                    regime_name=regime_name,
+                                    trend_result=trend_result,
+                                    latest=latest,
+                                    volatility_result=volatility_result,
+                                    volume_result=volume_result,
+                                    momentum_result=momentum_result,
+                                    strategy_route=strategy_route,
+                                    entry_quality_score=entry_quality_score,
+                                    allowed=True,
+                                    reason=allow_reason,
+                                    reason_exact=_friendly_reject_reason(allow_reason),
+                                    rejected_by_gate="none",
+                                    adaptive_entry_threshold=adaptive_threshold,
+                                    static_entry_threshold=static_threshold,
+                                    entry_quality_passed=entry_quality_passed,
+                                    entry_quality_gap=entry_quality_gap,
+                                    regime_risk_multiplier=regime_risk_multiplier,
+                                    regime_note=regime_note,
+                                    paper_mode=paper_mode,
+                                    relaxed_rules=aggressive_override.get("relaxed_rules", []),
+                                    selected_contract=contract,
+                                    spread_percent=spread_percent,
+                                ),
+                            }
+                        )
                         print("\n========== Position Saved ==========")
                         print(saved_position)
                         log_trade_event(

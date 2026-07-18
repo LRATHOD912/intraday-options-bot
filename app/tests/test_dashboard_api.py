@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from app.ai.claude_decision_engine import no_trade_decision
 from fastapi.testclient import TestClient
 
 from app.server.api import app, dashboard, ui, _build_dashboard_payload
@@ -197,6 +198,87 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(payload["status"]["regime_risk_multiplier"], 0.7)
         self.assertIn("adaptive threshold 60 for REVERSAL", payload["status"]["exact_rejection_reason"])
         self.assertEqual(payload["decision_history"][0]["adaptive_entry_threshold"], 60)
+
+    @patch("app.server.api.API_TOKEN", "test-token")
+    @patch("app.server.api.get_claude_status", return_value={
+        "enabled": True,
+        "model": "claude-sonnet-5",
+        "api_status": "ok",
+        "last_request_at": "2026-07-18T10:00:00+00:00",
+        "last_success_at": "2026-07-18T10:00:01+00:00",
+        "last_latency_ms": 120.5,
+        "last_error": None,
+        "last_decision": {
+            "decision": "PUT",
+            "confidence": 0.81,
+            "strategy": "TREND_PULLBACK",
+            "reason": "Bearish structure",
+            "position_size_percent": 0.2,
+            "decided_at": "2026-07-18T10:00:01+00:00",
+        },
+    })
+    @patch("app.server.api._read_jsonl", return_value=[])
+    @patch("app.server.api._read_json_file", return_value={})
+    @patch("app.server.api.get_summary", return_value={"today": {}, "overall": {}})
+    @patch("app.server.api.get_strategy_summary", return_value={"strategies": {}})
+    @patch("app.server.api.strategy_status", return_value={"disabled_strategies": []})
+    @patch("app.server.api.get_total_open_risk", return_value=0.0)
+    @patch("app.server.api.get_open_positions", return_value=[])
+    @patch("app.server.api.get_runner_status", return_value={"running": True, "thread_alive": True, "last_scan_at": "2026-07-18T10:00:00-04:00", "last_error": None})
+    def test_dashboard_includes_claude_panel(self, *_mocks):
+        payload = _build_dashboard_payload()
+
+        self.assertEqual(payload["status"]["decision_source"], "EXISTING_ENGINE")
+        self.assertTrue(payload["status"]["claude_enabled"])
+        self.assertEqual(payload["status"]["claude_model"], "claude-sonnet-5")
+        self.assertEqual(payload["claude"]["api_status"], "ok")
+        self.assertEqual(payload["claude"]["last_decision"], "PUT")
+
+    @patch("app.server.api.API_TOKEN", "test-token")
+    @patch("app.server.api.get_claude_status", return_value={
+        "enabled": True,
+        "model": "claude-sonnet-5",
+        "api_status": "ok",
+        "last_request_at": None,
+        "last_success_at": None,
+        "last_latency_ms": None,
+        "last_error": None,
+        "last_decision": {"decision": "PUT"},
+    })
+    def test_claude_status_endpoint(self, _mock_status):
+        client = TestClient(app)
+        response = client.get("/claude-status?api_token=test-token")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["model"], "claude-sonnet-5")
+
+    @patch("app.server.api.API_TOKEN", "test-token")
+    @patch("app.server.api.load_market_snapshot", return_value=None)
+    @patch("app.server.api.get_claude_trade_decision")
+    def test_claude_test_endpoint_uses_mock_snapshot_and_no_order(self, mock_decision, _mock_snapshot):
+        mock_decision.return_value = no_trade_decision("test")
+        client = TestClient(app)
+        response = client.post("/claude-test?api_token=test-token")
+        body = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["snapshot_source"], "mocked")
+        self.assertFalse(body["order_placement"])
+
+    @patch("app.server.api.API_TOKEN", "test-token")
+    @patch("app.server.api.get_claude_status", return_value={
+        "enabled": True,
+        "model": "claude-sonnet-5",
+        "api_status": "ok",
+        "last_request_at": None,
+        "last_success_at": "2026-07-18T10:00:01+00:00",
+        "last_latency_ms": 100.0,
+        "last_error": None,
+        "last_decision": {"decision": "CALL"},
+    })
+    def test_claude_last_decision_endpoint(self, _mock_status):
+        client = TestClient(app)
+        response = client.get("/claude-last-decision?api_token=test-token")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["last_decision"]["decision"], "CALL")
 
 
 if __name__ == "__main__":
